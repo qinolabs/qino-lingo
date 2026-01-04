@@ -1,0 +1,14 @@
+# Conversation data (large, kept separate)
+claude-conversation-*.md
+_noise/
+
+# Database (regenerable from metadata)
+corpus.db
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
