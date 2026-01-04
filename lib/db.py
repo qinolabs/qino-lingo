@@ -32,6 +32,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT UNIQUE NOT NULL,
+                session_id TEXT,  -- extracted from filename for stable identity
                 date TEXT,
                 is_agent BOOLEAN,
                 file_size INTEGER,
@@ -43,6 +44,9 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
                 dialogue_density REAL,
                 has_command_expansion BOOLEAN,
                 has_reflective_language BOOLEAN,
+                source_path TEXT,  -- original file location
+                status TEXT DEFAULT 'active',  -- active | filtered | pending
+                imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -88,25 +92,52 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
         """)
 
 
-def import_metadata(metadata_path: Path, db_path: Path = DEFAULT_DB_PATH):
-    """Import metadata from JSON into the database."""
+def extract_session_id(filename: str) -> Optional[str]:
+    """Extract session ID from filename for stable identity.
+
+    Filename format: claude-conversation-YYYY-MM-DD-HHMMSS-XXXXX.md
+    Session ID: the unique suffix (HHMMSS-XXXXX or similar)
+    """
+    import re
+    # Match the part after the date
+    match = re.search(r'\d{4}-\d{2}-\d{2}-(.+)\.md$', filename)
+    return match.group(1) if match else None
+
+
+def import_metadata(
+    metadata_path: Path,
+    source_dir: Optional[Path] = None,
+    db_path: Path = DEFAULT_DB_PATH
+):
+    """Import metadata from JSON into the database.
+
+    Args:
+        metadata_path: Path to metadata.json
+        source_dir: Original directory where files came from (for source_path)
+        db_path: Database path
+    """
     with open(metadata_path) as f:
         metadata = json.load(f)
 
     with get_connection(db_path) as conn:
         for m in metadata:
+            session_id = extract_session_id(m['filename'])
+            source_path = str(source_dir / m['filename']) if source_dir else None
+
             conn.execute("""
                 INSERT OR REPLACE INTO files (
-                    filename, date, is_agent, file_size,
+                    filename, session_id, date, is_agent, file_size,
                     user_turns, claude_turns, substantive_user_turns,
                     user_word_count, claude_word_count, dialogue_density,
-                    has_command_expansion, has_reflective_language
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    has_command_expansion, has_reflective_language,
+                    source_path, status, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
             """, (
-                m['filename'], m['date'], m['is_agent'], m['file_size'],
+                m['filename'], session_id, m['date'], m['is_agent'], m['file_size'],
                 m['user_turns'], m['claude_turns'], m['substantive_user_turns'],
                 m['user_word_count'], m['claude_word_count'], m['dialogue_density'],
-                m['has_command_expansion'], m['has_reflective_language']
+                m['has_command_expansion'], m['has_reflective_language'],
+                source_path
             ))
 
     return len(metadata)
@@ -166,8 +197,22 @@ def add_label(
     turn_end: Optional[int] = None,
     db_path: Path = DEFAULT_DB_PATH
 ) -> int:
-    """Add a label for a file or segment."""
+    """Add a label for a file or segment. Idempotent — updates if exists."""
     with get_connection(db_path) as conn:
+        # Check if label exists for this file/segment
+        existing = conn.execute("""
+            SELECT id FROM labels
+            WHERE file_id = ? AND turn_start IS ? AND turn_end IS ?
+        """, (file_id, turn_start, turn_end)).fetchone()
+
+        if existing:
+            # Update existing label
+            conn.execute("""
+                UPDATE labels SET is_rich = ?, notes = ?, created_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (is_rich, notes, existing[0]))
+            return existing[0]
+
         cursor = conn.execute("""
             INSERT INTO labels (file_id, turn_start, turn_end, is_rich, notes)
             VALUES (?, ?, ?, ?, ?)
@@ -201,8 +246,15 @@ def get_rich_files(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
 # --- Marker operations ---
 
 def add_marker(name: str, description: str = "", db_path: Path = DEFAULT_DB_PATH) -> int:
-    """Add a new marker to the vocabulary."""
+    """Add a new marker to the vocabulary. Idempotent — returns existing if name exists."""
     with get_connection(db_path) as conn:
+        # Check if exists
+        existing = conn.execute(
+            "SELECT id FROM markers WHERE name = ?", (name,)
+        ).fetchone()
+        if existing:
+            return existing[0]
+
         cursor = conn.execute("""
             INSERT INTO markers (name, description) VALUES (?, ?)
         """, (name, description))
@@ -246,6 +298,39 @@ def get_examples_for_marker(marker_id: int, db_path: Path = DEFAULT_DB_PATH) -> 
         return [dict(r) for r in rows]
 
 
+# --- File status operations ---
+
+def update_file_status(
+    file_id: int,
+    status: str,
+    db_path: Path = DEFAULT_DB_PATH
+) -> None:
+    """Update the status of a file (active, filtered, pending)."""
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE files SET status = ? WHERE id = ?",
+            (status, file_id)
+        )
+
+
+def get_files_by_status(
+    status: str,
+    db_path: Path = DEFAULT_DB_PATH
+) -> List[Dict]:
+    """Get files by status."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM files WHERE status = ? ORDER BY date DESC",
+            (status,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_pending_files(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
+    """Get files pending review (newly imported)."""
+    return get_files_by_status('pending', db_path)
+
+
 # --- Statistics ---
 
 def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
@@ -261,6 +346,12 @@ def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
         stats['rich_files'] = conn.execute(
             "SELECT COUNT(DISTINCT file_id) FROM labels WHERE is_rich = 1"
         ).fetchone()[0]
+
+        # Status breakdown
+        status_rows = conn.execute(
+            "SELECT status, COUNT(*) FROM files GROUP BY status"
+        ).fetchall()
+        stats['by_status'] = dict(status_rows)
 
         # Marker counts
         stats['total_markers'] = conn.execute("SELECT COUNT(*) FROM markers").fetchone()[0]

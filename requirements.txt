@@ -1,0 +1,10 @@
+# Core data analysis
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# Jupyter
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Nice terminal output (optional, for CLI tools)
+rich>=13.0.0
