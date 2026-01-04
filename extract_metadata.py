@@ -7,8 +7,9 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-CONV_DIR = Path("/Users/picard/Code/qinolabs/qino-conversations")
-OUTPUT_FILE = CONV_DIR / "metadata.json"
+PROJECT_DIR = Path("/Users/picard/Code/qinolabs/qino-conversations")
+CONV_DIR = PROJECT_DIR / "corpus"
+OUTPUT_FILE = PROJECT_DIR / "metadata.json"
 
 def extract_metadata(filepath):
     """Extract metadata from a single conversation file."""

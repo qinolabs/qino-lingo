@@ -1,6 +1,5 @@
 # Conversation data (large, kept separate)
-claude-conversation-*.md
-_noise/
+corpus/
 
 # Database (regenerable from metadata)
 corpus.db

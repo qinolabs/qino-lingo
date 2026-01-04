@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-CONV_DIR = Path("/Users/picard/Code/qinolabs/qino-conversations")
+CONV_DIR = Path("/Users/picard/Code/qinolabs/qino-conversations/corpus")
 NOISE_DIR = CONV_DIR / "_noise"
 
 # Ensure noise directory exists
