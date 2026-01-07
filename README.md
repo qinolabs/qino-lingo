@@ -27,9 +27,9 @@ The system doesn't know what "rich" means. You teach it through noticing.
 
 ## Corpus
 
-- **900 active conversation files** (filtered from 1,095 original)
-- **~400K user words, ~570K Claude words**
-- Dec 2, 2025 — Jan 4, 2026
+- **~1,000 active conversation files** (continuously growing)
+- **~470K user words, ~650K Claude words**
+- Dec 2, 2025 — present (continuous ingestion)
 - Stored in `corpus/` (gitignored — large files)
 
 ## Quick Start
@@ -77,10 +77,11 @@ qino-conversations/
 │   ├── schema.md
 │   ├── labeling-workflow.md
 │   └── labeler-concept-brief.md
-├── extract_metadata.py  # Corpus → metadata.json
-├── filter_noise.py      # Move noise to _noise/
-├── metadata.json        # Extracted file metadata
-├── corpus.db            # SQLite database (gitignored)
+├── ingest_conversations.py  # Extract from Claude Code storage
+├── extract_metadata.py      # Corpus → metadata.json
+├── filter_noise.py          # Move noise to _noise/
+├── metadata.json            # Extracted file metadata
+├── corpus.db                # SQLite database (gitignored)
 └── requirements.txt
 ```
 
@@ -113,9 +114,31 @@ Concrete excerpts linked to markers — the evidence for each pattern.
 This inquiry lives alongside a research thread at:
 `qino-research/inquiries/epistemological-signature/thread.md`
 
+## Ingestion
+
+New conversations can be pulled from Claude Code's local storage:
+
+```bash
+# Sync all new conversations since last import
+python3 ingest_conversations.py
+
+# Import only last N sessions (quick update)
+python3 ingest_conversations.py --recent 20
+
+# Preview without importing
+python3 ingest_conversations.py --dry-run
+
+# Import from specific date
+python3 ingest_conversations.py --since 2026-01-04
+```
+
+Requires [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor):
+```bash
+pipx install claude-conversation-extractor
+```
+
 ## Next Steps
 
 1. Develop labeling UI concept (see `docs/labeler-concept-brief.md`)
 2. Implement React app for keyboard-driven labeling
-3. Build continuous ingestion for new conversations
-4. Begin labeling to grow marker vocabulary
+3. Begin labeling to grow marker vocabulary

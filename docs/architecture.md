@@ -5,21 +5,35 @@ Technical architecture for the epistemological signature extraction pipeline.
 ## Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Data Flow                                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  Claude Conversations     Filtering        Metadata        Database │
-│  ─────────────────────►  ──────────►    ──────────────►  ─────────► │
-│  (raw markdown)          (noise removal)  (extraction)    (SQLite)  │
-│                                                                      │
-│  corpus/                 corpus/_noise/   metadata.json   corpus.db │
-│  1095 files              195 files        JSON array      4 tables  │
-│                          (gitignored)                                │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Data Flow                                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Claude Code      Extraction       Filtering       Metadata       Database   │
+│  Storage       ─────────────►   ──────────────►  ──────────────►  ─────────► │
+│  (~/.claude/)    (ingest_*)      (noise removal)  (extraction)    (SQLite)   │
+│                                                                               │
+│  JSONL files     corpus/         corpus/_noise/   metadata.json   corpus.db  │
+│  ~2000 sessions  ~1000 files                      JSON array      4 tables   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
+
+### 0. Conversation Extraction (ingest_conversations.py)
+
+Pulls conversations from Claude Code's local storage (`~/.claude/projects/`).
+
+Depends on [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor):
+```bash
+pipx install claude-conversation-extractor
+```
+
+Key features:
+- Extracts from configured project folders (see `INCLUDE_FOLDERS`)
+- Deduplicates by session ID against existing corpus
+- Handles truncated session IDs (UUID first segment, agent prefixes)
+- Runs full pipeline after extraction
 
 ### 1. Conversation Files (corpus/)
 
@@ -155,16 +169,26 @@ Functions:
 
 ## Continuous Ingestion
 
-New conversations can be added continuously:
+New conversations are ingested automatically from Claude Code's local storage:
 
-```
-1. Copy new files to corpus/
-2. Run extract_metadata.py (appends to metadata.json)
-3. import_metadata() with status='pending'
-4. Review pending files, mark active/filtered
+```bash
+# Full sync — extracts all new conversations
+python3 ingest_conversations.py
+
+# Quick update — only last N sessions
+python3 ingest_conversations.py --recent 20
+
+# Preview changes
+python3 ingest_conversations.py --dry-run
 ```
 
-Schema supports this via:
+The `ingest_conversations.py` script:
+1. Uses [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor) to export from `~/.claude/projects/`
+2. Filters to configured project folders (see `INCLUDE_FOLDERS` in script)
+3. Deduplicates by session ID against existing corpus
+4. Runs the pipeline: `filter_noise.py` → `extract_metadata.py` → DB import
+
+Schema supports incremental import via:
 - `session_id` — stable identity from filename
 - `source_path` — original file location
 - `status` — active | filtered | pending
