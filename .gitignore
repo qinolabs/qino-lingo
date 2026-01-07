@@ -1,8 +1,9 @@
-# Conversation data (large, kept separate)
+# Conversation data (large, private)
 corpus/
 
-# Database (regenerable from metadata)
+# Database and backups (contain conversation references)
 corpus.db
+backups/
 
 # Python
 __pycache__/
