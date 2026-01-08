@@ -1,15 +1,33 @@
 # Conversation data (large, private)
-corpus/
+data/corpus/
 
 # Database and backups (contain conversation references)
 corpus.db
 backups/
+
+# Generated metadata
+metadata.json
+.ingest_state.json
 
 # Python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .venv/
+
+# Node
+node_modules/
+
+# Build and cache
+.turbo/
+dist/
+.next/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
 
 # macOS
 .DS_Store
