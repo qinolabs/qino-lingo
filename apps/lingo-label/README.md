@@ -1,6 +1,6 @@
-# qino-label
+# lingo-label
 
-Turn-level conversation labeling interface for epistemic signature extraction.
+Turn-level text conversation labeling interface for epistemic signature extraction.
 
 ## Quick Start
 
@@ -10,7 +10,7 @@ pnpm install
 pnpm dev
 
 # Or directly
-cd apps/label
+cd apps/lingo-label
 pnpm dev
 ```
 

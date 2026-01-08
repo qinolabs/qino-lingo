@@ -7,7 +7,7 @@ Model training ecosystem for capturing epistemic signature from Claude conversat
 ```
 qino-lingo/
 ├── apps/
-│   └── label/              # qino-label (TanStack Start)
+│   └── lingo-label/        # Conversation labeling UI (TanStack Start)
 │       └── src/
 ├── python/
 │   └── qino_lingo/         # Python package
@@ -32,7 +32,7 @@ pnpm install
 pnpm dev
 
 # Run specific app
-pnpm -F @qino-lingo/label dev
+pnpm -F @qino-lingo/lingo-label dev
 
 # Typecheck all packages
 pnpm typecheck
@@ -43,11 +43,11 @@ pnpm lint
 
 ## Apps
 
-### qino-label (apps/label/)
-Turn-level labeling interface for conversation analysis.
+### lingo-label (apps/lingo-label/)
+Turn-level labeling interface for text conversation analysis.
 
 ```bash
-cd apps/label
+cd apps/lingo-label
 pnpm dev              # Start dev server on port 3008
 pnpm typecheck        # Type check
 pnpm check            # Typecheck + lint

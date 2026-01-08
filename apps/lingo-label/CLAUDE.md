@@ -1,6 +1,6 @@
-# qino-label
+# lingo-label
 
-Turn-level conversation labeling interface for epistemic signature extraction.
+Turn-level text conversation labeling interface for epistemic signature extraction.
 
 ## What This Is
 

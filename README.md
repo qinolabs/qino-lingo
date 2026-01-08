@@ -140,7 +140,7 @@ Conversations are extracted from Claude Code's local storage using [claude-conve
 ```
 qino-lingo/
 ├── apps/
-│   └── label/               # qino-label (TanStack Start)
+│   └── lingo-label/         # Text conversation labeling UI (TanStack Start)
 │       └── src/
 │           ├── routes/      # Pages and layouts
 │           ├── server/      # Server functions, DB access
