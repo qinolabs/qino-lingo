@@ -35,7 +35,7 @@ Key features:
 - Handles truncated session IDs (UUID first segment, agent prefixes)
 - Runs full pipeline after extraction
 
-### 1. Conversation Files (corpus/)
+### 1. Conversation Files (data/corpus/)
 
 Raw exports from Claude Code CLI. Format:
 
@@ -67,7 +67,7 @@ Key properties:
 
 ### 2. Noise Filtering (filter_noise.py)
 
-Moves obviously non-rich files to `corpus/_noise/`:
+Moves obviously non-rich files to `data/corpus/_noise/`:
 
 | Criterion | Description |
 |-----------|-------------|
@@ -107,11 +107,11 @@ Extracts quantitative signals from each file:
 - "i wonder"
 - "this feels like"
 
-### 4. Database (lib/db.py)
+### 4. Database (python/qino_lingo/db.py)
 
 SQLite database with four tables. See `docs/schema.md` for details.
 
-### 5. Parser (lib/parser.py)
+### 5. Parser (python/qino_lingo/parser.py)
 
 Transforms markdown files into structured Python objects:
 
@@ -138,7 +138,7 @@ Key methods:
 - `parse_conversation(filepath)` → `Conversation`
 - `parse_all_conversations(directory)` → `List[Conversation]`
 
-### 6. Sampler (lib/sampler.py)
+### 6. Sampler (python/qino_lingo/sampler.py)
 
 Stratified sampling for diverse labeling:
 
@@ -194,23 +194,24 @@ Schema supports incremental import via:
 - `status` — active | filtered | pending
 - `imported_at` — timestamp
 
+## Labeling UI
+
+The labeling interface is now implemented at `apps/label/`:
+- TanStack Start with server functions
+- Keyboard-driven interface for rapid labeling
+- Turn-level selection and marking
+- Noise prediction overlay from labeler model
+
 ## Future Components
 
-### Labeling UI (planned)
-
-React app in qinolabs-repo:
-- FastAPI server exposing db operations
-- Keyboard-driven interface for rapid labeling
-- Split-view: conversation | annotation
-- Marker management
-
-### Pattern Detection (eventual)
+### Pattern Detection
 
 - Embeddings for similarity to "rich" samples
 - Claude analysis to propose markers
 - Semi-automated candidate surfacing
 
-### Fine-Tuning Pipeline (eventual)
+### Fine-Tuning Pipeline
 
-- Format labeled data for training
-- Anthropic API or alternatives
+- Export labeled data to Hugging Face Dataset format
+- TRL for SFT/DPO training
+- Push models to Hub for deployment via Ollama

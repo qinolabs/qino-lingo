@@ -1,0 +1,4 @@
+# Noise filter dependencies
+sentence-transformers>=2.2.0
+scikit-learn>=1.0.0
+numpy>=1.21.0

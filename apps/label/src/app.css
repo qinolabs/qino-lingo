@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@import "./ui/styles/globals.css";
+
+:root {
+  --header-height: 56px;
+}
+
+html,
+body {
+  @apply min-h-screen bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-200;
+}
+
+/* Subtle noise texture overlay - 3% opacity for gentle grain */
+.noise-texture::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.03;
+  background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwBAMAAAClLOS0AAAAElBMVEUAAAAAAAAAAAAAAAAAAAAAAADgKxmiAAAABnRSTlMCCgkGBAXr3gGKAAAASklEQVQ4y2MYBaNg2AImKANdgBGKUQWY4BgggCaAJMAEx8ACTHCMLMAExygCTHCMIcAEx1gCTHCMK8AExyQKMMExuQJMcMwoGPIAAO6OC/VsTOgEAAAAAElFTkSuQmCC");
+  background-repeat: repeat;
+  border-radius: inherit;
+}

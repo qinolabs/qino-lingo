@@ -145,7 +145,7 @@ GROUP BY status
 ## Python API
 
 ```python
-from lib.db import (
+from python.qino_lingo.db import (
     init_db,           # Create schema
     import_metadata,   # JSON → database
     get_file,          # By filename

@@ -1,0 +1,215 @@
+# Frontend Template - Claude Instructions
+
+This template provides a React frontend with automatic type synchronization from backend services.
+
+## Architecture Overview
+
+This frontend template uses **automatic type propagation** where:
+- Backend types are consumed from `dist-types/` directory
+- Types update automatically during development
+- Full end-to-end type safety through tRPC
+
+## Template Adaptation Process
+
+### 1. Add Backend as Workspace Dependency
+
+In your frontend's `package.json`:
+```json
+{
+  "devDependencies": {
+    "@malao/your-backend": "workspace:*"
+  }
+}
+```
+Then run `pnpm install`.
+
+### 2. Connect to Your Backend
+
+Update the tRPC import in `src/trpc.ts`:
+
+```typescript
+// Import from backend's dist-types directory
+import type { AppRouter } from "@malao/your-backend/dist-types";
+```
+
+**Critical**: Always import from `dist-types/`, not from source files. This ensures you're using the compiled type definitions.
+
+### 3. Update Backend URL
+
+Change the backend URL in `src/trpc.ts`:
+
+```typescript
+// Update to your backend's URL environment variable
+url: import.meta.env.VITE_BACKEND_URL + "/trpc",
+```
+
+### 4. Using tRPC in Components
+
+Follow the established pattern from contact-bloom and other working projects:
+
+```typescript
+import { useTRPC } from "~/trpc";
+import { useMutation } from "@tanstack/react-query";
+
+function MyComponent() {
+  const trpc = useTRPC();
+  
+  const { mutate: myMutation, isPending } = useMutation(
+    trpc.myRouter.myProcedure.mutationOptions({
+      onSuccess: (result) => {
+        // Handle success - types are inferred from backend
+      },
+      onError: (error) => {
+        // Handle error - types are inferred from backend
+      },
+    })
+  );
+  
+  // Call mutation with proper typing
+  myMutation({ data: "example" });
+}
+```
+
+## Development Workflow
+
+### Automatic Type Synchronization
+
+When you run both backend and frontend in development:
+```bash
+# Terminal 1 - Backend (types auto-regenerate on save)
+pnpm -F @malao/your-backend dev
+
+# Terminal 2 - Frontend (consumes updated types)
+pnpm -F @malao/your-frontend dev
+```
+
+Or use a combined command in root package.json:
+```bash
+pnpm your-app:dev  # Runs both backend and frontend
+```
+
+**How it works**:
+1. Backend `dev` command watches files and regenerates types
+2. Frontend's turbo.json watches `dist-types/**/*.d.ts` for changes
+3. Types propagate instantly when you save backend files
+
+## Common Mistakes and Solutions
+
+### ❌ Wrong AppRouter Import
+```typescript
+// WRONG - importing from source
+import type { AppRouter } from "@malao/backend/src";
+
+// WRONG - importing from dist
+import type { AppRouter } from "@malao/backend/dist";
+```
+
+### ✅ Correct AppRouter Import
+```typescript
+// CORRECT - importing from dist-types
+import type { AppRouter } from "@malao/backend/dist-types";
+```
+
+### ❌ Wrong tRPC Usage Pattern
+```typescript
+// WRONG - trying to import trpc directly
+import { trpc } from "~/trpc";
+
+// WRONG - calling trpc as function
+trpc().myRouter.myProcedure.mutationOptions({...})
+```
+
+### ✅ Correct tRPC Usage Pattern
+```typescript
+// CORRECT - use the hook
+import { useTRPC } from "~/trpc";
+
+function Component() {
+  const trpc = useTRPC();
+  
+  // CORRECT - direct property access
+  trpc.myRouter.myProcedure.mutationOptions({...})
+}
+```
+
+### ❌ Modifying Core Files
+Don't modify:
+- `__root.tsx` provider structure  
+- Core tRPC setup beyond the AppRouter import
+- turbo.json task configurations
+
+### ✅ Backend Type Export Requirements
+
+The backend must export `AppRouter` type:
+
+```typescript
+// In backend/src/index.ts
+export const appRouter = router({
+  // your routes
+});
+
+export type AppRouter = typeof appRouter;
+```
+
+## Turbo Configuration
+
+The frontend's turbo.json is minimal but effective:
+
+```json
+{
+  "tasks": {
+    "dev": {
+      "dependsOn": ["^build:types"]  // Wait for backend types before starting
+    }
+  }
+}
+```
+
+### Why No Input Watching?
+
+You might expect to see backend type files in the `inputs` array:
+```json
+// NOT NEEDED - Turborepo handles this automatically
+"inputs": ["../../apps/backend/dist-types/**/*.d.ts"]
+```
+
+**This is unnecessary because**:
+1. Backend's `dev` command automatically regenerates types when files change
+2. TypeScript/Vite will detect the updated type files and refresh
+3. Adding inputs would cause unnecessary Turbo cache misses
+
+### How Type Updates Work
+1. **Backend file changes** → Backend's tsc watcher regenerates types
+2. **Types change** → TypeScript language server picks up changes  
+3. **Frontend refreshes** → Types are immediately available
+
+The key is that the backend handles type watching, not the frontend's Turbo configuration.
+
+## Troubleshooting
+
+### "Module has no exported member 'AppRouter'"
+
+**Cause**: Backend hasn't exported AppRouter type or hasn't built types
+
+**Solution**: 
+1. Add `export type AppRouter = typeof appRouter;` to backend `src/index.ts`
+2. Run `pnpm build:types` in backend
+3. Verify `dist-types/` directory exists and contains type files
+
+### "Property 'myRouter' does not exist"
+
+**Cause**: Frontend types don't match backend router structure
+
+**Solution**:
+1. Verify backend is running with `pnpm dev` (auto-regenerates types)
+2. Check backend router export names match frontend usage  
+3. Ensure frontend imports from `@malao/backend/dist-types`
+
+### Mutation argument type errors
+
+**Cause**: Using wrong tRPC patterns or missing type inference
+
+**Solution**:
+1. Use `const trpc = useTRPC();` pattern
+2. Let TypeScript infer types from backend
+3. Don't manually type callback parameters unless needed

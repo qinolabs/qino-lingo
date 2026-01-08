@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-PROJECT_DIR = Path("/Users/picard/Code/qinolabs/qino-conversations")
+PROJECT_DIR = Path("/Users/picard/Code/qinolabs/qino-lingo")
 CONV_DIR = PROJECT_DIR / "corpus"
 OUTPUT_FILE = PROJECT_DIR / "metadata.json"
 

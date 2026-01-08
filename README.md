@@ -1,4 +1,4 @@
-# qino-conversations
+# qino-lingo
 
 Teaching a model to think like you.
 
@@ -29,6 +29,49 @@ This work reflects a way of thinking that found its seed in Gregory and Nora Bat
 Nora extended this into **warm data**: "transcontextual information about the interrelationships that integrate a complex system." Not cold data extracted from context, but living information that shifts within the mutual learning of systems.
 
 The epistemological signature is warm data about thinking itself. It can't be captured in a checklist or defined in advance. It accumulates through noticing — through labeling that is attention, not categorization.
+
+## The Source
+
+The conversation material comes from daily work with Claude Code — the same sessions where concepts are developed, research is conducted, and code is implemented. There is no separate data collection step. The data isn't just *from* the process — it *is* the process.
+
+Every conversation is automatically extracted and ingested into the corpus. The source material is authentic — real work, not examples staged for data collection. The curation happens through labeling.
+
+## Native to Process
+
+Data labeling for training a fine-tuned qino model is native to the process itself. Labeling is integrated in the tools used for concept development, research, and implementation.
+
+**"What would qino say?"**
+
+A response from the personal model is displayed inline (via MCP server). When Claude and I are in a flow, I can call `/label` and it provides a link to open the current conversation in the browser.
+
+The web-based labeler shows the current conversation turns where I can efficiently mark turns or sequences:
+
+- **Epistemic signatures** — human turns that embody the particular biases of abduction-oriented thinking
+- **Enabling responses** — AI turns that created effective conditions for generative thinking
+
+## Two Models, One Loop
+
+**The qino chat model** responds when asked "what would qino say?" The aim is for it to show similar characteristics to my own biases — my epistemic signature in action.
+
+**The qino labeler model** attempts to identify epistemic signatures, enabling responses, and other markers (noise, neutral, etc). It runs automatically when `/label` is called, and results overlay the conversation turns in the labeler UI.
+
+The meta-learning happens when the labeler model's predictions don't match my manual markers.
+
+## Two Layers of Data
+
+We generate two layers:
+
+1. **Content-level markers** — messages and sequences that exemplify the desired quality
+2. **Quality content detection errors** — where qino labeler identified quality that wasn't there, or missed sequences that had it
+
+The data flows back into the next training cycle:
+
+- Next time I ask "What would qino say?" — the response might be of different quality
+- Next time I run `/label` — the labeler model might identify quality content more accurately
+
+I can use labeling confidence to:
+- Create a queue with **low confidence** ratings to efficiently improve the labeler
+- Create a queue with **high density of quality content** to add more good examples to the chat model training data
 
 ## The Labeling Flow
 
@@ -70,7 +113,7 @@ The unit of meaning is the dialogue pattern, not the individual message.
 
 ## The Labeling UI
 
-This repository contains the corpus and data infrastructure. The labeling interface lives in a separate app — keyboard-first, minimal chrome, designed for flow:
+The labeling interface is keyboard-first, minimal chrome, designed for flow:
 
 - `j/k` — Navigate turns
 - `Shift+j/k` — Extend selection (because richness often spans multiple turns)
@@ -81,43 +124,44 @@ This repository contains the corpus and data infrastructure. The labeling interf
 
 The bottleneck is reading and judging. Everything else should be instant.
 
-When a trained model exists, the rating panel shows its suggestion: "likely noise (0.82)" or "uncertain (0.45)". Confirm or override with a keystroke. Your correction becomes training signal. Active learning closing the loop.
-
-See [`docs/labeler-concept-brief.md`](docs/labeler-concept-brief.md) for the full design.
+When the labeler model has predictions, the rating panel shows its suggestion: "likely noise (0.82)" or "uncertain (0.45)". Confirm or override with a keystroke. Your correction becomes training signal. Active learning closing the loop.
 
 ## The Corpus
 
 - **~900+ active conversation files** (continuously growing)
 - **~470K user words, ~650K Claude words**
 - Dec 2, 2025 — present (continuous ingestion from Claude Code sessions)
-- Stored in `corpus/` (gitignored — large files)
+- Stored in `data/corpus/` (gitignored — large files)
 
 Conversations are extracted from Claude Code's local storage using [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor).
 
 ## Project Structure
 
 ```
-qino-conversations/
-├── corpus/               # Conversation files (gitignored)
-│   ├── claude-conversation-*.md
-│   └── _noise/          # Filtered noise files
-├── lib/
-│   ├── db.py            # Database operations
-│   ├── parser.py        # Markdown → Turn objects
-│   └── sampler.py       # Stratified sampling
-├── notebooks/
-│   └── 01_exploration.ipynb
+qino-lingo/
+├── apps/
+│   └── label/               # qino-label (TanStack Start)
+│       └── src/
+│           ├── routes/      # Pages and layouts
+│           ├── server/      # Server functions, DB access
+│           ├── components/  # Turn rendering, controls
+│           └── ui/          # Shared UI components
+├── python/
+│   └── qino_lingo/          # Python package
+│       ├── db.py            # Database operations
+│       ├── parser.py        # Markdown → Turn objects
+│       └── sampler.py       # Stratified sampling
+├── data/
+│   └── corpus/              # Conversation files (gitignored)
+│       ├── claude-conversation-*.md
+│       └── _noise/          # Filtered noise files
 ├── docs/
 │   ├── architecture.md
-│   ├── schema.md
-│   ├── labeling-workflow.md
 │   └── labeler-concept-brief.md
-├── ingest_conversations.py  # Extract from Claude Code storage
-├── extract_metadata.py      # Corpus → metadata.json
-├── filter_noise.py          # Move noise to _noise/
-├── metadata.json            # Extracted file metadata
-├── corpus.db                # SQLite database
-└── requirements.txt
+├── corpus.db                # SQLite database (shared interface)
+├── package.json             # pnpm workspace root
+├── pnpm-workspace.yaml
+└── turbo.json
 ```
 
 ## Key Concepts
@@ -134,39 +178,53 @@ An emergent vocabulary of epistemic patterns, discovered through labeling:
 
 Markers aren't defined upfront. They crystallize from repeated noticing.
 
-### Labels
+### Turn-Level Labels
 
-Human judgments on conversations: `is_rich` (boolean) + `notes` (what made it rich/not).
+- **Epistemic signature** — human turns embodying abductive thinking biases
+- **Enabling response** — AI turns that created generative conditions
+- **Noise** — administrative, tool-only, or low-signal content
+- **Neutral** — neither particularly rich nor noise
 
-### Examples
+### Meta-Labels (Layer 2)
 
-Concrete excerpts linked to markers — the evidence for each pattern.
+When labeler predictions exist:
+- Was the prediction correct?
+- Was surfacing this item useful?
+- Do the current categories fit what I'm seeing?
+
+Layer 2 creates a calibration flywheel — the labeling system improves itself.
 
 ## Quick Start
 
 ```bash
-# Create and activate virtual environment
-python3 -m venv .venv
+# Install dependencies
+pnpm install
+
+# Start the labeler app
+pnpm dev
+
+# Or run directly
+cd apps/label && pnpm dev
+```
+
+The app runs on port 3008. Configure paths in `apps/label/.env.local`:
+
+```bash
+CORPUS_DB_PATH=/path/to/qino-lingo/corpus.db
+CORPUS_DIR=/path/to/qino-lingo/data/corpus
+```
+
+## Python Tools
+
+```bash
+# Activate virtual environment
 source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
-
 # Initialize database
-python3 -c "from lib.db import init_db; init_db()"
+python3 -c "from python.qino_lingo.db import init_db; init_db()"
 
-# Extract metadata from corpus files
-python3 extract_metadata.py
-
-# Import metadata to database
-python3 -c "
-from pathlib import Path
-from lib.db import import_metadata
-import_metadata(Path('metadata.json'))
-"
-
-# Launch Jupyter for exploration
-jupyter notebook notebooks/01_exploration.ipynb
+# View corpus stats
+python3 -c "from python.qino_lingo.db import get_stats; print(get_stats())"
 ```
 
 ## Ingestion
@@ -182,9 +240,6 @@ python3 ingest_conversations.py --recent 20
 
 # Preview without importing
 python3 ingest_conversations.py --dry-run
-
-# Import from specific date
-python3 ingest_conversations.py --since 2026-01-04
 ```
 
 Requires [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor):

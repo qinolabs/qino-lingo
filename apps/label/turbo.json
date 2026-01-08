@@ -1,0 +1,19 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build:types", "typecheck"],
+      "outputs": ["dist/**"],
+      "inputs": [
+        "src/**", 
+        "package.json", 
+        "tsconfig.json", 
+        "vite.config.ts", 
+        "wrangler.jsonc", 
+        "components.json",
+        "env.d.ts"
+      ]
+    }
+  }
+}

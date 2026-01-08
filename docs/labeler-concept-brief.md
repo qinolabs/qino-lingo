@@ -125,7 +125,7 @@ The UI will live in **qinolabs-repo** (React + TypeScript + Tailwind).
 
 ### Backend
 
-FastAPI server in qino-conversations or qinolabs-repo/apps:
+FastAPI server in qino-lingo or qinolabs-repo/apps:
 
 ```python
 # Endpoints
