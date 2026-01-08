@@ -10,7 +10,7 @@ import { User, Bot, ChevronDown, ChevronUp } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { Button } from "~/ui/components/button";
+import { Button } from "@qino-lingo/ui/components/button";
 
 import type { ConversationTurn as TurnType } from "~/types";
 
@@ -24,9 +24,21 @@ interface ConversationTurnProps {
   isInRange: boolean;
   isFocus: boolean;
   isExpanded: boolean;
+  labelRating?: number | null;
+  labelTagCount?: number;
   onToggleExpand: () => void;
   onClick?: (e: React.MouseEvent) => void;
 }
+
+// Rating to icon color
+const RATING_ICON_COLORS: Record<number, string> = {
+  1: "text-neutral-400", // thin - visible but muted
+  2: "text-amber-500", // functional
+  3: "text-emerald-500", // rich
+};
+
+// Unlabeled icon color - very faded
+const UNLABELED_ICON_COLOR = "text-neutral-700";
 
 export function ConversationTurn({
   turn,
@@ -34,6 +46,8 @@ export function ConversationTurn({
   isInRange,
   isFocus,
   isExpanded,
+  labelRating,
+  labelTagCount = 0,
   onToggleExpand,
   onClick,
 }: ConversationTurnProps) {
@@ -79,13 +93,24 @@ export function ConversationTurn({
     );
   }
 
+  // Get icon color based on label rating
+  const iconColor = labelRating ? RATING_ICON_COLORS[labelRating] : null;
+
   // Human messages: pushed right, avatar on right
   if (isHuman) {
     return (
       <div className="group relative ml-12 mr-6">
-        {/* Avatar - absolute right */}
-        <div className="absolute -right-11 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/10">
-          <User className="h-4 w-4 text-amber-500/70" />
+        {/* Avatar - absolute right, with label status */}
+        <div className="absolute -right-11 top-3 flex flex-col items-center gap-1">
+          <div
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-800/50"
+            title={labelRating ? (labelRating === 1 ? "thin" : labelRating === 2 ? "functional" : "rich") : undefined}
+          >
+            <User className={`h-4 w-4 ${iconColor ?? UNLABELED_ICON_COLOR}`} />
+          </div>
+          {labelTagCount > 0 && (
+            <span className="text-[10px] text-neutral-500">+{labelTagCount}</span>
+          )}
         </div>
 
         <div
@@ -145,9 +170,17 @@ export function ConversationTurn({
   // Assistant messages: stay left, avatar on left
   return (
     <div className="group relative ml-6 mr-12">
-      {/* Avatar - absolute left */}
-      <div className="absolute -left-11 top-5 flex h-8 w-8 items-center justify-center rounded-full bg-violet-500/10">
-        <Bot className="h-4 w-4 text-violet-400/70" />
+      {/* Avatar - absolute left, with label status */}
+      <div className="absolute -left-11 top-5 flex flex-col items-center gap-1">
+        <div
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-800/50"
+          title={labelRating ? (labelRating === 1 ? "thin" : labelRating === 2 ? "functional" : "rich") : undefined}
+        >
+          <Bot className={`h-4 w-4 ${iconColor ?? UNLABELED_ICON_COLOR}`} />
+        </div>
+        {labelTagCount > 0 && (
+          <span className="text-[10px] text-neutral-500">+{labelTagCount}</span>
+        )}
       </div>
 
       <div

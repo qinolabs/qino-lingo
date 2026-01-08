@@ -1,5 +1,9 @@
 /**
  * Server function to get conversation details
+ *
+ * Supports two modes:
+ * - Queue mode: id is pending_labels.id (no labelId)
+ * - Edit mode: id is files.id, labelId is labels.id
  */
 
 import { createServerFn } from "@tanstack/react-start";
@@ -67,8 +71,26 @@ function parseConversation(content: string): ConversationTurn[] {
   return turns;
 }
 
+/**
+ * Find the conversation file, checking both corpus root and _noise subdirectory
+ */
+function findConversationFile(corpusDir: string, filename: string): string {
+  const filePath = join(corpusDir, filename);
+  if (existsSync(filePath)) {
+    return filePath;
+  }
+
+  const noisePath = join(corpusDir, "_noise", filename);
+  if (existsSync(noisePath)) {
+    return noisePath;
+  }
+
+  throw new Error(`Conversation file not found: ${filePath}`);
+}
+
 const ConversationIdSchema = z.object({
   id: z.string(),
+  labelId: z.number().optional(), // If present, edit mode
 });
 
 export const getConversation = createServerFn({ method: "GET" })
@@ -77,41 +99,92 @@ export const getConversation = createServerFn({ method: "GET" })
     const db = getDb();
     const corpusDir = getCorpusDir();
 
-    // Get pending label info with file data
-    const [pending] = await db
-      .select({
-        fileId: schema.pendingLabels.fileId,
-        turnStart: schema.pendingLabels.turnStart,
-        turnEnd: schema.pendingLabels.turnEnd,
-        filename: schema.files.filename,
-      })
-      .from(schema.pendingLabels)
-      .innerJoin(schema.files, eq(schema.pendingLabels.fileId, schema.files.id))
-      .where(eq(schema.pendingLabels.id, Number(data.id)));
+    let fileId: number;
+    let filename: string;
+    let turnStart: number | null = null;
+    let turnEnd: number | null = null;
+    let editingLabel: {
+      id: number;
+      rating: number | null;
+      tags: string | null;
+      notes: string | null;
+      turnStart: number | null;
+      turnEnd: number | null;
+    } | null = null;
 
-    if (!pending) {
-      throw new Error(`Pending label ${data.id} not found`);
+    if (data.labelId !== undefined) {
+      // Edit mode: id is files.id, labelId is labels.id
+      // Show FULL conversation (don't filter by turn range)
+      fileId = Number(data.id);
+
+      const [file] = await db
+        .select({ filename: schema.files.filename })
+        .from(schema.files)
+        .where(eq(schema.files.id, fileId));
+
+      if (!file) {
+        throw new Error(`File ${fileId} not found`);
+      }
+      filename = file.filename;
+
+      // Get the label being edited (for pre-filling form, not for filtering)
+      const [label] = await db
+        .select()
+        .from(schema.labels)
+        .where(eq(schema.labels.id, data.labelId));
+
+      if (label) {
+        editingLabel = {
+          id: label.id,
+          rating: label.rating,
+          tags: label.tags,
+          notes: label.notes,
+          turnStart: label.turnStart,
+          turnEnd: label.turnEnd,
+        };
+        // Don't set turnStart/turnEnd here - we want full conversation in edit mode
+      }
+    } else {
+      // Queue mode: id is pending_labels.id
+      const [pending] = await db
+        .select({
+          fileId: schema.pendingLabels.fileId,
+          turnStart: schema.pendingLabels.turnStart,
+          turnEnd: schema.pendingLabels.turnEnd,
+          filename: schema.files.filename,
+        })
+        .from(schema.pendingLabels)
+        .innerJoin(
+          schema.files,
+          eq(schema.pendingLabels.fileId, schema.files.id)
+        )
+        .where(eq(schema.pendingLabels.id, Number(data.id)));
+
+      if (!pending) {
+        throw new Error(`Pending label ${data.id} not found`);
+      }
+
+      fileId = pending.fileId;
+      filename = pending.filename;
+      turnStart = pending.turnStart;
+      turnEnd = pending.turnEnd;
     }
 
     // Read conversation file
-    const filePath = join(corpusDir, pending.filename);
-    if (!existsSync(filePath)) {
-      throw new Error(`Conversation file not found: ${filePath}`);
-    }
-
+    const filePath = findConversationFile(corpusDir, filename);
     const content = readFileSync(filePath, "utf-8");
     let turns = parseConversation(content);
 
     // Filter to specific turn range if specified
-    if (pending.turnStart !== null && pending.turnEnd !== null) {
-      turns = turns.slice(pending.turnStart, pending.turnEnd + 1);
+    if (turnStart !== null && turnEnd !== null) {
+      turns = turns.slice(turnStart, turnEnd + 1);
     }
 
     // Get existing labels for this file
     const existingLabels = await db
       .select()
       .from(schema.labels)
-      .where(eq(schema.labels.fileId, pending.fileId));
+      .where(eq(schema.labels.fileId, fileId));
 
     // Get available markers
     const availableMarkers = await db.select().from(schema.markers);
@@ -126,12 +199,10 @@ export const getConversation = createServerFn({ method: "GET" })
         mlIsNoise: schema.noisePredictions.mlIsNoise,
       })
       .from(schema.noisePredictions)
-      .where(eq(schema.noisePredictions.fileId, pending.fileId));
+      .where(eq(schema.noisePredictions.fileId, fileId));
 
     // Create a map for quick lookup
-    const noiseByTurn = new Map(
-      noisePredictions.map((p) => [p.turnIdx, p])
-    );
+    const noiseByTurn = new Map(noisePredictions.map((p) => [p.turnIdx, p]));
 
     // Attach noise info to turns
     const turnsWithNoise = turns.map((turn, idx) => {
@@ -151,9 +222,11 @@ export const getConversation = createServerFn({ method: "GET" })
 
     return {
       id: data.id,
-      filename: pending.filename,
+      fileId,
+      filename,
       turns: turnsWithNoise,
       existingLabels,
       availableMarkers,
+      editingLabel, // Pre-fill values when editing
     };
   });

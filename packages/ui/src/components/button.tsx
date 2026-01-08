@@ -3,7 +3,7 @@ import * as React from "react";
 import { cva } from "class-variance-authority";
 import { Slot } from "radix-ui";
 
-import { cn } from "~/ui/lib/utils";
+import { cn } from "@qino-lingo/ui/lib/utils";
 
 const buttonVariants = cva(
   "focus-visible:border-ring focus-visible:ring-ring/50 inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",

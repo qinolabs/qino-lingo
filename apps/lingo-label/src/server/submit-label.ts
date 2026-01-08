@@ -1,19 +1,25 @@
 /**
  * Server function to submit a label
+ *
+ * Supports both:
+ * - Queue mode: creates new label and removes from pending queue
+ * - Edit mode: updates existing label
  */
 
 import { createServerFn } from "@tanstack/react-start";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, schema } from "./db";
 
 const SubmitLabelSchema = z.object({
   id: z.string(),
-  rating: z.number().min(1).max(5),
+  fileId: z.number(),
+  rating: z.number().min(1).max(3), // 1=thin, 2=functional, 3=rich
+  tags: z.array(z.string()), // Secondary tags
   notes: z.string(),
-  markers: z.array(z.string()),
-  turnStart: z.number().optional(),
-  turnEnd: z.number().optional(),
+  turnStart: z.number(),
+  turnEnd: z.number(),
+  isEditMode: z.boolean(),
 });
 
 export const submitLabel = createServerFn({ method: "POST" })
@@ -21,34 +27,65 @@ export const submitLabel = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const db = getDb();
 
-    // Get fileId from pending_labels
-    const [pending] = await db
-      .select({ fileId: schema.pendingLabels.fileId })
-      .from(schema.pendingLabels)
-      .where(eq(schema.pendingLabels.id, Number(data.id)));
+    // Check if a label already exists for this file/segment (idempotent upsert)
+    const existingLabelConditions =
+      data.turnStart !== null && data.turnEnd !== null
+        ? and(
+            eq(schema.labels.fileId, data.fileId),
+            eq(schema.labels.turnStart, data.turnStart),
+            eq(schema.labels.turnEnd, data.turnEnd)
+          )
+        : and(
+            eq(schema.labels.fileId, data.fileId),
+            isNull(schema.labels.turnStart),
+            isNull(schema.labels.turnEnd)
+          );
 
-    if (!pending) {
-      throw new Error(`Pending label ${data.id} not found`);
+    const [existingLabel] = await db
+      .select({ id: schema.labels.id })
+      .from(schema.labels)
+      .where(existingLabelConditions);
+
+    const tagsJson = data.tags.length > 0 ? JSON.stringify(data.tags) : null;
+
+    if (existingLabel) {
+      // Update existing label
+      await db
+        .update(schema.labels)
+        .set({
+          rating: data.rating,
+          tags: tagsJson,
+          notes: data.notes || null,
+          createdAt: new Date().toISOString(),
+        })
+        .where(eq(schema.labels.id, existingLabel.id));
+    } else {
+      // Insert new label
+      await db.insert(schema.labels).values({
+        fileId: data.fileId,
+        turnStart: data.turnStart,
+        turnEnd: data.turnEnd,
+        rating: data.rating,
+        tags: tagsJson,
+        notes: data.notes || null,
+      });
     }
 
-    // Determine richness based on rating (4-5 = rich)
-    const isRich = data.rating >= 4;
+    // In queue mode, remove from pending queue and get next item
+    let nextId: number | null = null;
+    if (!data.isEditMode) {
+      await db
+        .delete(schema.pendingLabels)
+        .where(eq(schema.pendingLabels.id, Number(data.id)));
 
-    // Insert label with optional turn range
-    await db.insert(schema.labels).values({
-      fileId: pending.fileId,
-      turnStart: data.turnStart ?? null,
-      turnEnd: data.turnEnd ?? null,
-      isRich,
-      notes: data.notes || null,
-    });
+      // Get next pending item
+      const [next] = await db
+        .select({ id: schema.pendingLabels.id })
+        .from(schema.pendingLabels)
+        .limit(1);
 
-    // TODO: Handle markers - insert into examples if specified
+      nextId = next?.id ?? null;
+    }
 
-    // Remove from pending queue
-    await db
-      .delete(schema.pendingLabels)
-      .where(eq(schema.pendingLabels.id, Number(data.id)));
-
-    return { success: true };
+    return { success: true, nextId };
   });

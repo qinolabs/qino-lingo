@@ -8,19 +8,21 @@ Model training ecosystem for capturing epistemic signature from Claude conversat
 qino-lingo/
 ├── apps/
 │   └── lingo-label/        # Conversation labeling UI (TanStack Start)
-│       └── src/
+├── packages/
+│   └── ui/                 # Shared UI components
 ├── python/
 │   └── qino_lingo/         # Python package
-│       ├── db.py           # Database operations
-│       ├── parser.py       # Conversation parsing
-│       └── sampler.py      # Sample selection
 ├── data/
 │   └── corpus/             # Conversation markdown files (gitignored)
 ├── corpus.db               # SQLite database
 ├── package.json            # pnpm workspace root
-├── pnpm-workspace.yaml     # apps/*
+├── pnpm-workspace.yaml     # apps/*, packages/*
 └── turbo.json              # TypeScript task orchestration
 ```
+
+## Rules
+
+Code style guidelines: @.claude/rules/code-style.md
 
 ## Development Commands
 

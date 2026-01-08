@@ -1,8 +1,10 @@
 /**
- * Stats panel component
+ * Stats panel component - acts as navigation tabs
  *
- * Displays gentle stats without pressure — inform, don't instruct.
+ * Displays stats that double as clickable tabs for navigation.
  */
+
+export type TabId = "queue" | "labeled" | "noise" | "uncertain";
 
 interface StatsProps {
   labels: {
@@ -20,47 +22,84 @@ interface StatsProps {
     uncertain: number;
     uncertainQueued: number;
   };
+  activeTab: TabId;
+  onTabChange: (tab: TabId) => void;
 }
 
-function StatCard({
+function StatTab({
   value,
   label,
   sublabel,
+  isActive,
+  onClick,
 }: {
   value: number;
   label: string;
   sublabel?: string;
+  isActive: boolean;
+  onClick: () => void;
 }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 text-center">
-      <div className="text-2xl font-light text-neutral-100">{value}</div>
-      <div className="mt-1 text-sm text-neutral-500">{label}</div>
+    <button
+      onClick={onClick}
+      className={`rounded-lg border p-4 text-center transition ${
+        isActive
+          ? "border-blue-500/50 bg-blue-500/10"
+          : "border-neutral-800 bg-neutral-900/50 hover:border-neutral-700 hover:bg-neutral-800/50"
+      }`}
+    >
+      <div
+        className={`text-2xl font-light ${isActive ? "text-blue-400" : "text-neutral-100"}`}
+      >
+        {value}
+      </div>
+      <div
+        className={`mt-1 text-sm ${isActive ? "text-blue-400/70" : "text-neutral-500"}`}
+      >
+        {label}
+      </div>
       {sublabel && (
-        <div className="mt-0.5 text-xs text-neutral-600">{sublabel}</div>
+        <div
+          className={`mt-0.5 text-xs ${isActive ? "text-blue-400/50" : "text-neutral-600"}`}
+        >
+          {sublabel}
+        </div>
       )}
-    </div>
+    </button>
   );
 }
 
-export function StatsPanel({ labels, queue, noise }: StatsProps) {
+export function StatsPanel({
+  labels,
+  queue,
+  noise,
+  activeTab,
+  onTabChange,
+}: StatsProps) {
   return (
     <div className="grid grid-cols-4 gap-3">
-      <StatCard
+      <StatTab
         value={queue.pending}
         label="to label"
         sublabel={queue.pending > 0 ? "in queue" : undefined}
+        isActive={activeTab === "queue"}
+        onClick={() => onTabChange("queue")}
       />
-      <StatCard
+      <StatTab
         value={labels.total}
         label="labeled"
         sublabel={labels.rich > 0 ? `${labels.rich} rich` : undefined}
+        isActive={activeTab === "labeled"}
+        onClick={() => onTabChange("labeled")}
       />
-      <StatCard
+      <StatTab
         value={noise.deterministic}
         label="noise"
         sublabel="flagged"
+        isActive={activeTab === "noise"}
+        onClick={() => onTabChange("noise")}
       />
-      <StatCard
+      <StatTab
         value={noise.uncertain}
         label="uncertain"
         sublabel={
@@ -68,6 +107,8 @@ export function StatsPanel({ labels, queue, noise }: StatsProps) {
             ? `${noise.uncertainQueued} queued`
             : "ML predictions"
         }
+        isActive={activeTab === "uncertain"}
+        onClick={() => onTabChange("uncertain")}
       />
     </div>
   );

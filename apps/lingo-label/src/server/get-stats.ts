@@ -9,11 +9,13 @@ import { getDb, schema } from "./db";
 export const getStats = createServerFn({ method: "GET" }).handler(async () => {
   const db = getDb();
 
-  // Get label counts
+  // Get label counts by rating tier
   const [labelStats] = await db
     .select({
       total: sql<number>`COUNT(*)`,
-      rich: sql<number>`SUM(CASE WHEN ${schema.labels.isRich} = 1 THEN 1 ELSE 0 END)`,
+      rich: sql<number>`SUM(CASE WHEN ${schema.labels.rating} = 3 THEN 1 ELSE 0 END)`,
+      functional: sql<number>`SUM(CASE WHEN ${schema.labels.rating} = 2 THEN 1 ELSE 0 END)`,
+      thin: sql<number>`SUM(CASE WHEN ${schema.labels.rating} = 1 THEN 1 ELSE 0 END)`,
     })
     .from(schema.labels);
 
@@ -46,7 +48,8 @@ export const getStats = createServerFn({ method: "GET" }).handler(async () => {
     labels: {
       total: labelStats?.total ?? 0,
       rich: labelStats?.rich ?? 0,
-      thin: (labelStats?.total ?? 0) - (labelStats?.rich ?? 0),
+      functional: labelStats?.functional ?? 0,
+      thin: labelStats?.thin ?? 0,
     },
     queue: {
       pending: queueStats?.pending ?? 0,

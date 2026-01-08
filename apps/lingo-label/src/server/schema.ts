@@ -38,7 +38,8 @@ export const labels = sqliteTable("labels", {
     .references(() => files.id),
   turnStart: integer("turn_start"),
   turnEnd: integer("turn_end"),
-  isRich: integer("is_rich", { mode: "boolean" }).notNull(),
+  rating: integer("rating").notNull(), // 1=thin, 2=functional, 3=rich
+  tags: text("tags"), // JSON array of secondary tags
   notes: text("notes"),
   createdAt: text("created_at").default("CURRENT_TIMESTAMP"),
 });

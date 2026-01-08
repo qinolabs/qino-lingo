@@ -1,7 +1,7 @@
 import { createRouter } from "@tanstack/react-router";
 
-import { DefaultCatchBoundary } from "~/ui/components/default-catch-boundary";
-import { NotFound } from "~/ui/components/not-found";
+import { DefaultCatchBoundary } from "@qino-lingo/ui/components/default-catch-boundary";
+import { NotFound } from "@qino-lingo/ui/components/not-found";
 
 import { routeTree } from "./routeTree.gen";
 

@@ -1,0 +1,26 @@
+{
+  "name": "@qino-lingo/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["src"],
+  "exports": {
+    "./lib/utils": "./src/lib/utils.ts",
+    "./components/*": "./src/components/*.tsx",
+    "./styles/globals.css": "./src/styles/globals.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@tanstack/react-router": "^1.97.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "radix-ui": "^1.4.3",
+    "tailwind-merge": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
