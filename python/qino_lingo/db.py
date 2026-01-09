@@ -56,7 +56,8 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
                 file_id INTEGER NOT NULL,
                 turn_start INTEGER,  -- NULL means whole conversation
                 turn_end INTEGER,
-                is_rich BOOLEAN NOT NULL,
+                rating INTEGER NOT NULL,  -- 1=thin, 2=functional, 3=rich
+                tags TEXT,  -- JSON array of secondary tags
                 notes TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (file_id) REFERENCES files(id)
@@ -191,13 +192,26 @@ def get_files_by_criteria(
 
 def add_label(
     file_id: int,
-    is_rich: bool,
+    rating: int,
+    tags: Optional[List[str]] = None,
     notes: str = "",
     turn_start: Optional[int] = None,
     turn_end: Optional[int] = None,
     db_path: Path = DEFAULT_DB_PATH
 ) -> int:
-    """Add a label for a file or segment. Idempotent — updates if exists."""
+    """Add a label for a file or segment. Idempotent — updates if exists.
+
+    Args:
+        file_id: ID of the file being labeled
+        rating: 1=thin, 2=functional, 3=rich
+        tags: Optional list of secondary tags
+        notes: Optional notes
+        turn_start: Start turn (None means whole conversation)
+        turn_end: End turn
+        db_path: Database path
+    """
+    tags_json = json.dumps(tags) if tags else None
+
     with get_connection(db_path) as conn:
         # Check if label exists for this file/segment
         existing = conn.execute("""
@@ -208,15 +222,15 @@ def add_label(
         if existing:
             # Update existing label
             conn.execute("""
-                UPDATE labels SET is_rich = ?, notes = ?, created_at = CURRENT_TIMESTAMP
+                UPDATE labels SET rating = ?, tags = ?, notes = ?, created_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            """, (is_rich, notes, existing[0]))
+            """, (rating, tags_json, notes, existing[0]))
             return existing[0]
 
         cursor = conn.execute("""
-            INSERT INTO labels (file_id, turn_start, turn_end, is_rich, notes)
-            VALUES (?, ?, ?, ?, ?)
-        """, (file_id, turn_start, turn_end, is_rich, notes))
+            INSERT INTO labels (file_id, turn_start, turn_end, rating, tags, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (file_id, turn_start, turn_end, rating, tags_json, notes))
         return cursor.lastrowid
 
 
@@ -233,13 +247,27 @@ def get_labels(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
 
 
 def get_rich_files(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
-    """Get files labeled as rich."""
+    """Get files labeled as rich (rating = 3)."""
     with get_connection(db_path) as conn:
         rows = conn.execute("""
             SELECT f.* FROM files f
             JOIN labels l ON f.id = l.file_id
-            WHERE l.is_rich = 1
+            WHERE l.rating = 3
         """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_files_by_rating(
+    rating: int,
+    db_path: Path = DEFAULT_DB_PATH
+) -> List[Dict]:
+    """Get files with a specific rating (1=thin, 2=functional, 3=rich)."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT f.* FROM files f
+            JOIN labels l ON f.id = l.file_id
+            WHERE l.rating = ?
+        """, (rating,)).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -343,9 +371,17 @@ def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
         stats['labeled_files'] = conn.execute(
             "SELECT COUNT(DISTINCT file_id) FROM labels"
         ).fetchone()[0]
-        stats['rich_files'] = conn.execute(
-            "SELECT COUNT(DISTINCT file_id) FROM labels WHERE is_rich = 1"
-        ).fetchone()[0]
+
+        # Rating breakdown (1=thin, 2=functional, 3=rich)
+        rating_rows = conn.execute(
+            "SELECT rating, COUNT(*) FROM labels GROUP BY rating"
+        ).fetchall()
+        stats['by_rating'] = {
+            row[0]: row[1] for row in rating_rows
+        }
+        stats['rich_files'] = stats['by_rating'].get(3, 0)
+        stats['functional_files'] = stats['by_rating'].get(2, 0)
+        stats['thin_files'] = stats['by_rating'].get(1, 0)
 
         # Status breakdown
         status_rows = conn.execute(

@@ -1,0 +1,1 @@
+# qino-lingo MCP server
