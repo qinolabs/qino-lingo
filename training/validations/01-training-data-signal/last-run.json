@@ -1,0 +1,24 @@
+{
+  "validation_id": "01",
+  "timestamp": "2026-01-09T20:46:49.166566",
+  "results": [
+    {
+      "name": "Data sufficiency",
+      "passed": false,
+      "output": "Data Sufficiency Check\n----------------------\nTotal labels: 3 (need \u226530)\nThin (1): 1 (need \u22655)\nFunctional (2): 2 (need \u22655)\nRich (3): 0 (need \u22655)\n\nStatus: FAIL - Need more labels\n",
+      "error": null,
+      "duration_ms": 1,
+      "metadata": {
+        "total_labels": 3,
+        "thin": 1,
+        "functional": 2,
+        "rich": 0
+      }
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+  }
+}
