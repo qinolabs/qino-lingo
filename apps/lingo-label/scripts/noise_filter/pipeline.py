@@ -35,9 +35,9 @@ def check_training_data(db_path: str) -> dict:
     """)
     noise_count = cursor.fetchone()[0]
 
-    # Count signal labels (rich)
+    # Count signal labels (rich, rating = 3)
     cursor.execute("""
-        SELECT COUNT(*) FROM labels WHERE is_rich = 1 AND (notes IS NULL OR notes NOT LIKE '%[NOISE]%')
+        SELECT COUNT(*) FROM labels WHERE rating = 3 AND (notes IS NULL OR notes NOT LIKE '%[NOISE]%')
     """)
     signal_count = cursor.fetchone()[0]
 

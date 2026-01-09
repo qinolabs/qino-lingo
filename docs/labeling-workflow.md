@@ -61,10 +61,11 @@ samples = sample_stratified(n_per_stratum=2)
 file = samples['high_engagement'][0]
 # ... read the conversation ...
 
-# Label it
+# Label it (rating: 1=thin, 2=functional, 3=rich)
 add_label(
     file_id=file['id'],
-    is_rich=True,
+    rating=3,  # rich
+    tags=["framing-before-solving"],
     notes="Beautiful reframing at turn 4. Question held open before resolving."
 )
 ```
@@ -163,12 +164,13 @@ from lib.sampler import get_labeling_progress
 
 progress = get_labeling_progress()
 # {
-#     'total': 900,
+#     'total': 999,
 #     'labeled': 42,
-#     'unlabeled': 858,
+#     'unlabeled': 957,
+#     'thin': 8,
+#     'functional': 16,
 #     'rich': 18,
-#     'not_rich': 24,
-#     'progress_pct': 4.7
+#     'progress_pct': 4.2
 # }
 ```
 

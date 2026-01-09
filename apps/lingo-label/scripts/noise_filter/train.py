@@ -102,12 +102,12 @@ def load_training_data(db_path: str, corpus_dir: str) -> tuple[list[str], list[i
     noise_labels = cursor.fetchall()
     print(f"Found {len(noise_labels)} noise-labeled ranges")
 
-    # Get signal labels (rich conversations, rating >= 4 / is_rich = true)
+    # Get signal labels (rich conversations, rating = 3)
     cursor.execute("""
         SELECT l.file_id, l.turn_start, l.turn_end, l.notes, f.filename, f.source_path
         FROM labels l
         JOIN files f ON l.file_id = f.id
-        WHERE l.is_rich = 1 AND (l.notes IS NULL OR l.notes NOT LIKE '%[NOISE]%')
+        WHERE l.rating = 3 AND (l.notes IS NULL OR l.notes NOT LIKE '%[NOISE]%')
     """)
     signal_labels = cursor.fetchall()
     print(f"Found {len(signal_labels)} signal-labeled ranges")

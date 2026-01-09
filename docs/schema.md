@@ -43,7 +43,8 @@ Human judgments on conversations or segments.
 | file_id | INTEGER | Foreign key → files.id |
 | turn_start | INTEGER | Start turn index (NULL = whole conversation) |
 | turn_end | INTEGER | End turn index |
-| is_rich | BOOLEAN | Rich/not-rich judgment |
+| rating | INTEGER | Quality judgment: 1=thin, 2=functional, 3=rich |
+| tags | TEXT | JSON array of secondary tags |
 | notes | TEXT | Annotation explaining judgment |
 | created_at | TEXT | Timestamp |
 
@@ -107,12 +108,12 @@ WHERE l.id IS NULL
 ORDER BY f.substantive_user_turns DESC
 ```
 
-### Rich files
+### Rich files (rating = 3)
 
 ```sql
 SELECT f.* FROM files f
 JOIN labels l ON f.id = l.file_id
-WHERE l.is_rich = 1
+WHERE l.rating = 3
 ```
 
 ### Examples for a marker

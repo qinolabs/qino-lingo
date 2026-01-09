@@ -136,18 +136,19 @@ def get_labeling_progress(db_path: Path = DEFAULT_DB_PATH) -> Dict:
     with get_connection(db_path) as conn:
         total = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         labeled = conn.execute("SELECT COUNT(DISTINCT file_id) FROM labels").fetchone()[0]
-        rich = conn.execute(
-            "SELECT COUNT(DISTINCT file_id) FROM labels WHERE is_rich = 1"
-        ).fetchone()[0]
-        not_rich = conn.execute(
-            "SELECT COUNT(DISTINCT file_id) FROM labels WHERE is_rich = 0"
-        ).fetchone()[0]
+
+        # Rating breakdown (1=thin, 2=functional, 3=rich)
+        rating_rows = conn.execute(
+            "SELECT rating, COUNT(*) FROM labels GROUP BY rating"
+        ).fetchall()
+        by_rating = {row[0]: row[1] for row in rating_rows}
 
         return {
             'total': total,
             'labeled': labeled,
             'unlabeled': total - labeled,
-            'rich': rich,
-            'not_rich': not_rich,
+            'thin': by_rating.get(1, 0),
+            'functional': by_rating.get(2, 0),
+            'rich': by_rating.get(3, 0),
             'progress_pct': round(100 * labeled / total, 1) if total > 0 else 0
         }
