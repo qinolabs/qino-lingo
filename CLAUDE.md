@@ -69,7 +69,29 @@ source .venv/bin/activate
 
 # Run database operations
 python -c "from python.qino_lingo.db import get_stats; print(get_stats())"
+
+# AI characterization — epistemic analysis via LLM
+python -m python.qino_lingo.characterize --strategy signal --limit 5 --dry-run
+
+# Calibration rounds — themed human labeling for ground truth
+python -m python.qino_lingo.calibrate themes                        # list themes + eligible counts
+python -m python.qino_lingo.calibrate round --theme broad_seeding   # create round
+python -m python.qino_lingo.calibrate present --round 1             # show all items
+python -m python.qino_lingo.calibrate present --round 1 --item 3    # show one item
+python -m python.qino_lingo.calibrate label --round 1 --item 1 --rating 3
+python -m python.qino_lingo.calibrate interpret --round 1           # analyze + suggest next
+python -m python.qino_lingo.calibrate status                        # all rounds overview
 ```
+
+### Python Modules
+
+| Module | Purpose |
+|--------|---------|
+| `db.py` | Database operations, schema, label/marker CRUD |
+| `parser.py` | Markdown conversation files → `Turn`/`Conversation` objects |
+| `sampler.py` | Stratified sampling for labeling |
+| `characterize.py` | AI epistemic analysis via OpenRouter (stores in `pending_labels`) |
+| `calibrate.py` | Themed calibration rounds for human ground-truth labeling |
 
 ## Architecture
 

@@ -128,8 +128,8 @@ When the labeler model has predictions, the rating panel shows its suggestion: "
 
 ## The Corpus
 
-- **~900+ active conversation files** (continuously growing)
-- **~470K user words, ~650K Claude words**
+- **~1,500 conversation files** (1,100+ non-agent, continuously growing)
+- **~1.9M user words, ~2.1M Claude words**
 - Dec 2, 2025 — present (continuous ingestion from Claude Code sessions)
 - Stored in `data/corpus/` (gitignored — large files)
 
@@ -150,7 +150,9 @@ qino-lingo/
 │   └── qino_lingo/          # Python package
 │       ├── db.py            # Database operations
 │       ├── parser.py        # Markdown → Turn objects
-│       └── sampler.py       # Stratified sampling
+│       ├── sampler.py       # Stratified sampling
+│       ├── characterize.py  # AI epistemic analysis via LLM
+│       └── calibrate.py     # Themed calibration rounds for human labeling
 ├── data/
 │   └── corpus/              # Conversation files (gitignored)
 │       ├── claude-conversation-*.md

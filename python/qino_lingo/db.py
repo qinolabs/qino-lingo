@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from contextlib import contextmanager
 
-DEFAULT_DB_PATH = Path(__file__).parent.parent / "corpus.db"
+DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "corpus.db"
 
 
 @contextmanager

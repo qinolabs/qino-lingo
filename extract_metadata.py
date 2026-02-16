@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 PROJECT_DIR = Path("/Users/picard/Code/qinolabs/qino-lingo")
-CONV_DIR = PROJECT_DIR / "corpus"
+CONV_DIR = PROJECT_DIR / "data" / "corpus"
 OUTPUT_FILE = PROJECT_DIR / "metadata.json"
 
 def extract_metadata(filepath):

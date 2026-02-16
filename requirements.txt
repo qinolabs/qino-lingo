@@ -8,3 +8,9 @@ ipykernel>=6.0.0
 
 # Nice terminal output (optional, for CLI tools)
 rich>=13.0.0
+
+# AI characterization engine
+openrouter>=0.1.0
+
+# HTTP client for sync operations
+requests>=2.28.0

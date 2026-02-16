@@ -23,27 +23,18 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).parent
-CORPUS_DIR = PROJECT_DIR / "corpus"
+CORPUS_DIR = PROJECT_DIR / "data" / "corpus"
 METADATA_FILE = PROJECT_DIR / "metadata.json"
 STATE_FILE = PROJECT_DIR / ".ingest_state.json"
 
 # Project folders to extract from (relative to ~/Code/)
+# These are matched as prefixes against decoded Claude project directory names.
+# Claude encodes paths like /Users/picard/Code/qinolabs/qino-claude as
+# -Users-picard-Code-qinolabs-qino-claude, and the filter decodes dashes back
+# to slashes. A single "qinolabs" entry matches all qinolabs sub-projects
+# via prefix matching, while excluding unrelated projects (e.g. malao).
 INCLUDE_FOLDERS = [
-    "qinolabs/concepts/repo",
-    "qinolabs/qino/claude",
-    "qinolabs/qino/claude/plugins",
-    "qinolabs/qino/claude/plugins/qino/prose",
-    "qinolabs/qino/conversations",
-    "qinolabs/qino/legal",
-    "qinolabs/qino/research",
-    "qinolabs/qinolabs/legal",
-    "qinolabs/qinolabs/repo",
-    "qinolabs/qinolabs/repo/apps/image/gen",
-    "qinolabs/qinolabs/repo/apps/qino/chronicles",
-    "qinolabs/qinolabs/repo/apps/qino/chronicles/backend",
-    "qinolabs/qinolabs/repo/apps/qino/journal",
-    "qinolabs/qinolabs/repo/apps/qino/journal/backend",
-    "qinolabs/qinolabs/repo/apps/qino/world/backend",
+    "qinolabs",
 ]
 
 
@@ -205,7 +196,7 @@ def run_pipeline():
     print("\n--- Importing to database ---")
     subprocess.run([
         "python3", "-c",
-        "from pathlib import Path; from lib.db import import_metadata; import_metadata(Path('metadata.json'))"
+        "from pathlib import Path; from python.qino_lingo.db import import_metadata; import_metadata(Path('metadata.json'), db_path=Path('corpus.db'))"
     ], cwd=PROJECT_DIR)
 
 

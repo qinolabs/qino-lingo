@@ -6,7 +6,8 @@ import re
 import shutil
 from pathlib import Path
 
-CONV_DIR = Path("/Users/picard/Code/qinolabs/qino-lingo/corpus")
+PROJECT_DIR = Path(__file__).parent
+CONV_DIR = PROJECT_DIR / "data" / "corpus"
 NOISE_DIR = CONV_DIR / "_noise"
 
 # Ensure noise directory exists
