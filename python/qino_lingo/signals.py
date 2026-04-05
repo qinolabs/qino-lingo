@@ -1,0 +1,559 @@
+"""
+Conversation signal extraction for the corpus explorer.
+
+Pre-computes per-conversation signals: concept density, rich turns,
+corrections, meta-awareness, trajectory shape, cross-referencing.
+
+Usage:
+    python -m qino_lingo.signals compute              # Full corpus
+    python -m qino_lingo.signals compute --since 2026-04-01
+    python -m qino_lingo.signals check                # Staleness check
+    python -m qino_lingo.signals version              # Show algorithm info
+"""
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from .cleaning import clean_conversation, CleanedExchange
+from .db import get_connection, DEFAULT_DB_PATH
+
+ALGORITHM_VERSION = "v6"
+
+PROJECT_DIR = Path(__file__).parent.parent.parent
+CORPUS_DIR = PROJECT_DIR / "data" / "corpus"
+
+# --- Signal vocabularies ---
+
+CONCEPTUAL_KEYWORDS = [
+    "essence", "emergence", "pattern", "tension", "resonance", "principle",
+    "insight", "philosophy", "meaning", "quality", "relationship between",
+    "what makes", "the nature of", "wondering", "deeper", "realization",
+    "substrate", "encounter", "figure thread", "modality",
+    "ecosystem", "attunement", "calibration", "epistemic", "abductive",
+    "transcontextual", "bateson", "warm data", "recursive", "sensitivity",
+    "disposition", "voicing", "contour", "awakening", "lineage",
+    "what if we", "this reminds me", "this connects to", "the shape of",
+    "there is something about", "the question is", "i noticed",
+    "i realized", "it occurred to me", "the real", "the distinction",
+    "what surprised", "the deeper", "fundamentally",
+    "domain language", "design principle", "the potential",
+    "porosity", "membrane", "tradition",
+]
+
+CORRECTION_PATTERNS = [
+    r"(doesn't|does not|didn't|did not) (sit|feel|land) (right|well|good)",
+    r"(that's |that is )not (what|how|the)",
+    r"i think you (don't|do not) get",
+    r"(skip|drop|stop|no[,.])",
+    r"be (careful|aware)",
+    r"the real (question|issue|point|problem)",
+    r"not .{3,30} but ",
+    r"^actually[,.]",
+    r"my (concern|worry|sense) is",
+    r"(i |we )(don't|shouldn't|should not) ",
+    r"(this is off|this feels off|something.{0,10}off)",
+    r"(let me|let's) (correct|clarify|push back)",
+    r"(dangerous|misleading|wrong direction|misaligned)",
+]
+
+META_AWARENESS_PATTERNS = [
+    r"i('m| am) noticing",
+    r"let('s| us) pause",
+    r"(the arc|an arc) (we|i|that)",
+    r"(this|that|it) (is|feels) connected to",
+    r"the thread (we|i|that|between)",
+    r"what just happened",
+    r"(we('re| are)|i('m| am)) (on|in the middle of|circling)",
+    r"this conversation",
+    r"looking back at (what|how|where)",
+    r"(the same|exactly the) (tension|pattern|question|structure)",
+    r"i (see|notice|recognize) (the|a) (pattern|arc|thread|connection|structure)",
+]
+
+MODALITY_FULLNAMES = [
+    "qino-world", "qino-walk", "qino-drops", "qino-chronicles", "qino-journal",
+    "qino-arc", "qino-frame", "qino-label", "lens-lab", "sound-lab",
+]
+
+BARE_MODALITY_NAMES = {
+    "world": "world", "walk": "walk", "drops": "drops",
+    "chronicles": "chronicles", "journal": "journal", "arc": "arc",
+    "frame": "frame", "label": "label",
+}
+
+
+# --- Signal scoring functions ---
+
+
+def score_conceptual(text: str) -> int:
+    """Count conceptual keyword matches in text."""
+    lower = text.lower()
+    return sum(1 for kw in CONCEPTUAL_KEYWORDS if kw in lower)
+
+
+def detect_correction(text: str) -> bool:
+    """Detect user pushback/redirect patterns."""
+    lower = text.lower()
+    return any(re.search(p, lower) for p in CORRECTION_PATTERNS)
+
+
+def detect_meta_awareness(text: str) -> bool:
+    """Detect self-referential moments about the conversation's own structure."""
+    lower = text.lower()
+    return any(re.search(p, lower) for p in META_AWARENESS_PATTERNS)
+
+
+def count_cross_refs(text: str) -> tuple[int, list[str]]:
+    """Count distinct modalities referenced. Returns (diversity, keyword_list)."""
+    lower = text.lower()
+    mentioned: set[str] = set()
+
+    for term in MODALITY_FULLNAMES:
+        if term in lower:
+            mentioned.add(term.replace("qino-", "").replace("-lab", ""))
+
+    # Bare names count only when 2+ appear
+    bare_found: set[str] = set()
+    for bare, canonical in BARE_MODALITY_NAMES.items():
+        if re.search(rf"\b{bare}\b", lower):
+            bare_found.add(canonical)
+
+    if len(bare_found) >= 2:
+        mentioned.update(bare_found)
+
+    diversity = max(0, len(mentioned) - 1)
+    return diversity, sorted(mentioned)
+
+
+# --- Trajectory ---
+
+
+def compute_trajectory(exchanges: list[CleanedExchange]) -> str:
+    """Classify conversation trajectory shape from cleaned exchanges.
+
+    Divides into thirds, compares concept density across them.
+    Returns: SHIFT, SUSTAINED, DEEPENING, FADING, or FLAT.
+    """
+    if len(exchanges) < 3:
+        return "FLAT"
+
+    third = len(exchanges) // 3
+    opening = exchanges[:third]
+    middle = exchanges[third : 2 * third]
+    closing = exchanges[2 * third :]
+
+    def density(exs: list[CleanedExchange]) -> float:
+        total_words = sum(e.user_words for e in exs)
+        if total_words == 0:
+            return 0.0
+        total_concept = sum(score_conceptual(e.user_text) for e in exs)
+        return total_concept / total_words * 1000
+
+    d_open = density(opening)
+    d_mid = density(middle)
+    d_close = density(closing)
+
+    # Technical opening that becomes conceptual
+    if d_open < d_close * 0.6 and d_close > 5:
+        return "SHIFT"
+    # Conceptual throughout
+    if d_open > 5 and d_close > 5 and abs(d_open - d_close) < max(d_open, d_close) * 0.4:
+        return "SUSTAINED"
+    # Gets more conceptual over time
+    if d_close > d_open * 1.5 and d_close > 5:
+        return "DEEPENING"
+    # Starts conceptual, becomes execution
+    if d_open > d_close * 1.5 and d_open > 5:
+        return "FADING"
+
+    return "FLAT"
+
+
+# --- Per-conversation analysis ---
+
+
+@dataclass
+class ConversationSignals:
+    """Complete signal profile for one conversation."""
+
+    filename: str
+    metalogue_score: int = 0
+    concept_density: float = 0.0
+    reflective_turns: int = 0
+    reflective_words: int = 0
+    rich_turns: int = 0
+    medium_rich_turns: int = 0
+    very_rich_turns: int = 0
+    corrections: int = 0
+    meta_awareness: int = 0
+    cross_diversity: int = 0
+    terse_ratio: float = 0.0
+    trajectory_shape: str = "FLAT"
+    concept_keywords: list[str] = field(default_factory=list)
+    best_preview: str = ""
+    algorithm_version: str = ALGORITHM_VERSION
+
+
+def analyze_conversation(filepath: Path) -> Optional[ConversationSignals]:
+    """Run full signal analysis on a single conversation file.
+
+    Returns None if the conversation has insufficient content.
+    """
+    try:
+        exchanges = clean_conversation(filepath)
+    except Exception:
+        return None
+
+    # Filter to reflective exchanges (not system, not terse)
+    reflective = [e for e in exchanges if not e.is_system and not e.is_terse]
+    if len(reflective) < 2:
+        return None
+
+    total_user_turns = len(exchanges)
+    terse_count = sum(1 for e in exchanges if e.is_terse)
+    system_count = sum(1 for e in exchanges if e.is_system)
+    terse_ratio = terse_count / total_user_turns if total_user_turns > 0 else 0.0
+
+    # Per-turn signals
+    total_words = 0
+    total_concept = 0
+    very_rich = 0
+    rich = 0
+    medium_rich = 0
+    correction_count = 0
+    meta_count = 0
+    all_concept_keywords: set[str] = set()
+    best_turn_score = -1
+    best_turn_text = ""
+
+    for ex in reflective:
+        total_words += ex.user_words
+        concept = score_conceptual(ex.user_text)
+        total_concept += concept
+
+        # Track matched keywords
+        lower = ex.user_text.lower()
+        for kw in CONCEPTUAL_KEYWORDS:
+            if kw in lower:
+                all_concept_keywords.add(kw)
+
+        # Rich turn tiers
+        if ex.user_words >= 200 and concept >= 3:
+            very_rich += 1
+        if ex.user_words >= 100 and concept >= 3:
+            rich += 1
+        elif ex.user_words >= 60 and concept >= 2:
+            medium_rich += 1
+
+        # Correction and meta signals
+        if detect_correction(ex.user_text):
+            correction_count += 1
+        if detect_meta_awareness(ex.user_text):
+            meta_count += 1
+
+        # Track best preview (richest turn)
+        turn_score = concept * 10 + ex.user_words
+        if turn_score > best_turn_score and concept >= 1:
+            best_turn_score = turn_score
+            best_turn_text = ex.user_text
+
+    concept_per_1k = (total_concept / total_words * 1000) if total_words > 0 else 0.0
+
+    # Cross-referencing
+    all_text = " ".join(e.user_text for e in reflective)
+    cross_diversity, _ = count_cross_refs(all_text)
+
+    # Trajectory
+    trajectory_shape = compute_trajectory(reflective)
+
+    # Best preview: truncate at sentence boundary
+    preview = best_turn_text[:700]
+    if len(best_turn_text) > 700:
+        cut = preview.rfind(". ")
+        if cut > 400:
+            preview = preview[: cut + 1]
+        preview += " [...]"
+
+    # --- Scoring (v6 algorithm) ---
+    score = 0.0
+
+    # Rich turns — three tiers
+    score += very_rich * 20
+    score += rich * 10
+    score += medium_rich * 5
+
+    # Bare long turns (long but not conceptual) — minimal signal
+    bare_long = sum(1 for e in reflective if e.user_words >= 100) - rich
+    score += max(0, bare_long) * 1
+
+    # Concept density — strong signal with bonus tiers
+    score += min(concept_per_1k * 6, 60)
+    if concept_per_1k >= 10:
+        score += 30
+    elif concept_per_1k >= 8:
+        score += 15
+
+    # Correction/pushback signal (capped)
+    score += min(correction_count * 3, 15)
+
+    # Meta-awareness signal (capped, high value)
+    score += min(meta_count * 8, 24)
+
+    # Cross-referencing
+    score += cross_diversity * 4
+
+    # Low-density penalty
+    if concept_per_1k < 4.0:
+        score *= 0.5
+
+    # Terse penalty
+    if terse_ratio > 0.5:
+        score *= 0.4
+    elif terse_ratio > 0.3:
+        score *= 0.7
+
+    # Volume penalty for very long sessions
+    if total_user_turns > 150:
+        score *= 0.7
+    elif total_user_turns > 100:
+        score *= 0.85
+
+    return ConversationSignals(
+        filename=filepath.name,
+        metalogue_score=round(score),
+        concept_density=round(concept_per_1k, 1),
+        reflective_turns=len(reflective),
+        reflective_words=total_words,
+        rich_turns=rich,
+        medium_rich_turns=medium_rich,
+        very_rich_turns=very_rich,
+        corrections=correction_count,
+        meta_awareness=meta_count,
+        cross_diversity=cross_diversity,
+        terse_ratio=round(terse_ratio, 2),
+        trajectory_shape=trajectory_shape,
+        concept_keywords=sorted(all_concept_keywords),
+        best_preview=preview,
+    )
+
+
+# --- Database storage ---
+
+
+_CREATE_SIGNALS_TABLE = """
+CREATE TABLE IF NOT EXISTS conversation_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER UNIQUE NOT NULL,
+    metalogue_score INTEGER,
+    concept_density REAL,
+    reflective_turns INTEGER,
+    reflective_words INTEGER,
+    rich_turns INTEGER,
+    medium_rich_turns INTEGER,
+    very_rich_turns INTEGER,
+    corrections INTEGER,
+    meta_awareness INTEGER,
+    cross_diversity INTEGER,
+    terse_ratio REAL,
+    trajectory_shape TEXT,
+    concept_keywords TEXT,
+    best_preview TEXT,
+    computed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    algorithm_version TEXT,
+    FOREIGN KEY (file_id) REFERENCES files(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_score
+    ON conversation_signals(metalogue_score DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_file
+    ON conversation_signals(file_id);
+"""
+
+_CREATE_ANNOTATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS annotations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL,
+    exchange_start INTEGER,
+    exchange_end INTEGER,
+    kind TEXT NOT NULL,
+    value TEXT,
+    thread TEXT,
+    notes TEXT,
+    source TEXT DEFAULT 'human',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_annotations_file ON annotations(file_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_kind ON annotations(kind);
+CREATE INDEX IF NOT EXISTS idx_annotations_thread ON annotations(thread);
+"""
+
+_CREATE_SESSION_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
+"""
+
+
+def init_signal_tables(db_path: Path = DEFAULT_DB_PATH):
+    """Create the conversation_signals and annotations tables if needed."""
+    with get_connection(db_path) as conn:
+        conn.executescript(_CREATE_SIGNALS_TABLE)
+        conn.executescript(_CREATE_ANNOTATIONS_TABLE)
+        conn.executescript(_CREATE_SESSION_INDEX)
+
+
+def store_signals(
+    signals: ConversationSignals,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> bool:
+    """Store or update signals for a conversation. Returns True if stored."""
+    with get_connection(db_path) as conn:
+        # Look up file_id from filename
+        row = conn.execute(
+            "SELECT id FROM files WHERE filename = ?", (signals.filename,)
+        ).fetchone()
+        if not row:
+            return False
+        file_id = row[0]
+
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO conversation_signals (
+                file_id, metalogue_score, concept_density,
+                reflective_turns, reflective_words,
+                rich_turns, medium_rich_turns, very_rich_turns,
+                corrections, meta_awareness, cross_diversity,
+                terse_ratio, trajectory_shape, concept_keywords,
+                best_preview, computed_at, algorithm_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (
+                file_id,
+                signals.metalogue_score,
+                signals.concept_density,
+                signals.reflective_turns,
+                signals.reflective_words,
+                signals.rich_turns,
+                signals.medium_rich_turns,
+                signals.very_rich_turns,
+                signals.corrections,
+                signals.meta_awareness,
+                signals.cross_diversity,
+                signals.terse_ratio,
+                signals.trajectory_shape,
+                json.dumps(signals.concept_keywords),
+                signals.best_preview,
+                signals.algorithm_version,
+            ),
+        )
+        return True
+
+
+def check_staleness(db_path: Path = DEFAULT_DB_PATH) -> dict:
+    """Check if stored signals are stale (different algorithm version)."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM conversation_signals WHERE algorithm_version != ?",
+            (ALGORITHM_VERSION,),
+        ).fetchone()
+        stale = row[0] if row else 0
+
+        total = conn.execute("SELECT COUNT(*) FROM conversation_signals").fetchone()[0]
+
+        return {
+            "current_version": ALGORITHM_VERSION,
+            "total_computed": total,
+            "stale_count": stale,
+            "is_stale": stale > 0,
+        }
+
+
+def compute_all(
+    corpus_dir: Path = CORPUS_DIR,
+    db_path: Path = DEFAULT_DB_PATH,
+    since: Optional[str] = None,
+):
+    """Compute signals for all conversations and store in DB.
+
+    Args:
+        corpus_dir: Directory containing conversation markdown files
+        db_path: Database path
+        since: Only compute for files dated on or after this date (YYYY-MM-DD)
+    """
+    init_signal_tables(db_path)
+
+    files = sorted(corpus_dir.glob("claude-conversation-*.md"))
+    if since:
+        files = [
+            f
+            for f in files
+            if (m := re.search(r"(\d{4}-\d{2}-\d{2})", f.name))
+            and m.group(1) >= since
+        ]
+
+    print(f"Computing signals for {len(files)} conversations...")
+    computed = 0
+    skipped = 0
+
+    for filepath in files:
+        signals = analyze_conversation(filepath)
+        if signals:
+            if store_signals(signals, db_path):
+                computed += 1
+            else:
+                skipped += 1
+        else:
+            skipped += 1
+
+    print(f"Done: {computed} computed, {skipped} skipped")
+    return computed
+
+
+# --- CLI ---
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Conversation signal analysis")
+    sub = parser.add_subparsers(dest="command")
+
+    compute_cmd = sub.add_parser("compute", help="Compute signals for corpus")
+    compute_cmd.add_argument("--since", help="Only files since date (YYYY-MM-DD)")
+    compute_cmd.add_argument("--db", default=str(DEFAULT_DB_PATH))
+    compute_cmd.add_argument("--corpus", default=str(CORPUS_DIR))
+
+    check_cmd = sub.add_parser("check", help="Check for stale signals")
+    check_cmd.add_argument("--db", default=str(DEFAULT_DB_PATH))
+
+    sub.add_parser("version", help="Show algorithm version")
+
+    args = parser.parse_args()
+
+    if args.command == "compute":
+        compute_all(
+            corpus_dir=Path(args.corpus),
+            db_path=Path(args.db),
+            since=args.since,
+        )
+    elif args.command == "check":
+        result = check_staleness(Path(args.db))
+        print(f"Algorithm version: {result['current_version']}")
+        print(f"Computed signals: {result['total_computed']}")
+        if result["is_stale"]:
+            print(f"WARNING: {result['stale_count']} signals are stale — run 'compute' to update")
+        else:
+            print("All signals up to date")
+    elif args.command == "version":
+        print(f"Algorithm version: {ALGORITHM_VERSION}")
+        print(f"Changelog: docs/signal-algorithm-changelog.md")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

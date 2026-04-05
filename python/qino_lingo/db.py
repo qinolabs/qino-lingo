@@ -402,3 +402,116 @@ def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
         stats['total_claude_words'] = row[1] or 0
 
         return stats
+
+
+# --- Annotation operations ---
+
+
+def add_annotation(
+    file_id: int,
+    kind: str,
+    value: Optional[str] = None,
+    thread: Optional[str] = None,
+    notes: Optional[str] = None,
+    exchange_start: Optional[int] = None,
+    exchange_end: Optional[int] = None,
+    source: str = "human",
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    """Add an annotation to a conversation.
+
+    Supports whole-conversation (exchange_start/end both None)
+    or passage-level (both set) annotations.
+    Multiple annotations per conversation are allowed.
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO annotations (
+                file_id, exchange_start, exchange_end,
+                kind, value, thread, notes, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (file_id, exchange_start, exchange_end, kind, value, thread, notes, source),
+        )
+        return cursor.lastrowid
+
+
+def get_annotations(
+    file_id: Optional[int] = None,
+    kind: Optional[str] = None,
+    thread: Optional[str] = None,
+    source: Optional[str] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict]:
+    """Get annotations, optionally filtered."""
+    query = """
+        SELECT a.*, f.filename, f.session_id, f.date
+        FROM annotations a
+        JOIN files f ON a.file_id = f.id
+        WHERE 1=1
+    """
+    params: list = []
+
+    if file_id is not None:
+        query += " AND a.file_id = ?"
+        params.append(file_id)
+    if kind is not None:
+        query += " AND a.kind = ?"
+        params.append(kind)
+    if thread is not None:
+        query += " AND a.thread = ?"
+        params.append(thread)
+    if source is not None:
+        query += " AND a.source = ?"
+        params.append(source)
+
+    query += " ORDER BY a.created_at DESC"
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_annotation(
+    annotation_id: int,
+    value: Optional[str] = None,
+    thread: Optional[str] = None,
+    notes: Optional[str] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Update an existing annotation."""
+    updates = []
+    params: list = []
+
+    if value is not None:
+        updates.append("value = ?")
+        params.append(value)
+    if thread is not None:
+        updates.append("thread = ?")
+        params.append(thread)
+    if notes is not None:
+        updates.append("notes = ?")
+        params.append(notes)
+
+    if not updates:
+        return
+
+    params.append(annotation_id)
+    with get_connection(db_path) as conn:
+        conn.execute(
+            f"UPDATE annotations SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+
+
+def get_file_by_session(
+    session_id: str,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> Optional[Dict]:
+    """Look up a file by session_id (used by MCP tools)."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM files WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return dict(row) if row else None
