@@ -14,9 +14,15 @@ DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "corpus.db"
 
 @contextmanager
 def get_connection(db_path: Path = DEFAULT_DB_PATH):
-    """Context manager for database connections."""
+    """Context manager for database connections.
+
+    Foreign key enforcement is enabled per-connection (SQLite requires this
+    to be set on every connection — schema FK declarations alone are not
+    enforced). Without this, deletes/replaces silently orphan dependent rows.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
@@ -125,14 +131,34 @@ def import_metadata(
             session_id = extract_session_id(m['filename'])
             source_path = str(source_dir / m['filename']) if source_dir else None
 
+            # Proper UPSERT — preserves files.id across re-imports so that
+            # FK references in conversation_signals, labels, noise_predictions,
+            # etc. remain valid. The previous INSERT OR REPLACE pattern
+            # delete+inserted on conflict, allocating a new auto-increment id
+            # and silently orphaning every dependent row.
             conn.execute("""
-                INSERT OR REPLACE INTO files (
+                INSERT INTO files (
                     filename, session_id, date, is_agent, file_size,
                     user_turns, claude_turns, substantive_user_turns,
                     user_word_count, claude_word_count, dialogue_density,
                     has_command_expansion, has_reflective_language,
                     source_path, status, imported_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+                ON CONFLICT(filename) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    date = excluded.date,
+                    is_agent = excluded.is_agent,
+                    file_size = excluded.file_size,
+                    user_turns = excluded.user_turns,
+                    claude_turns = excluded.claude_turns,
+                    substantive_user_turns = excluded.substantive_user_turns,
+                    user_word_count = excluded.user_word_count,
+                    claude_word_count = excluded.claude_word_count,
+                    dialogue_density = excluded.dialogue_density,
+                    has_command_expansion = excluded.has_command_expansion,
+                    has_reflective_language = excluded.has_reflective_language,
+                    source_path = excluded.source_path,
+                    imported_at = CURRENT_TIMESTAMP
             """, (
                 m['filename'], session_id, m['date'], m['is_agent'], m['file_size'],
                 m['user_turns'], m['claude_turns'], m['substantive_user_turns'],

@@ -185,8 +185,25 @@ def copy_to_corpus(files: list[Path]) -> int:
     return count
 
 
-def run_pipeline():
-    """Run the post-import pipeline: filter_noise, extract_metadata, import."""
+def oldest_date_in(files: list[Path]) -> str | None:
+    """Return the earliest YYYY-MM-DD date found in a list of conversation filenames."""
+    dates: list[str] = []
+    for filepath in files:
+        match = re.search(r"(\d{4}-\d{2}-\d{2})", filepath.name)
+        if match:
+            dates.append(match.group(1))
+    return min(dates) if dates else None
+
+
+def run_pipeline(since: str | None = None):
+    """Run the post-import pipeline: filter_noise, extract_metadata, import, signals.
+
+    Args:
+        since: If provided, scope the signals computation to files dated on or
+               after this date. The signals step is idempotent (INSERT OR REPLACE),
+               so a slightly wide window is harmless. Pass the oldest date among
+               newly-ingested files for tight scoping.
+    """
     print("\n--- Running noise filter ---")
     subprocess.run(["python3", "filter_noise.py"], cwd=PROJECT_DIR)
 
@@ -198,6 +215,104 @@ def run_pipeline():
         "python3", "-c",
         "from pathlib import Path; from python.qino_lingo.db import import_metadata; import_metadata(Path('metadata.json'), db_path=Path('corpus.db'))"
     ], cwd=PROJECT_DIR)
+
+    print("\n--- Computing signals ---")
+    signals_cmd = ["python3", "-m", "python.qino_lingo.signals", "compute"]
+    if since:
+        signals_cmd += ["--since", since]
+    subprocess.run(signals_cmd, cwd=PROJECT_DIR)
+
+
+def print_digest():
+    """Print a post-ingest digest: corpus state + new high-signal arrivals.
+
+    This is the part that earns the manual workflow's keep — without a digest,
+    `make ingest` is just script noise. With it, every ingestion ends in a
+    moment of attention on what actually arrived.
+    """
+    state = load_state()
+    last_count = state.get("last_count", 0)
+    last_ingest = state.get("last_ingest", "?")
+
+    print("\n" + "=" * 60)
+    print("INGEST DIGEST")
+    print("=" * 60)
+    print(f"Last ingest:     {last_ingest}")
+    print(f"New this run:    {last_count}")
+
+    # Query corpus state directly so the digest reflects ground truth,
+    # not just what this script thinks happened.
+    digest_code = """
+import json
+from pathlib import Path
+from python.qino_lingo.db import get_connection
+
+with get_connection(Path('corpus.db')) as conn:
+    total = conn.execute("SELECT COUNT(*) FROM files WHERE status='active'").fetchone()[0]
+    with_sig = conn.execute("SELECT COUNT(*) FROM conversation_signals").fetchone()[0]
+    no_sig = conn.execute('''
+        SELECT COUNT(*) FROM files f
+        WHERE f.status='active'
+        AND f.id NOT IN (SELECT file_id FROM conversation_signals)
+    ''').fetchone()[0]
+    max_date = conn.execute("SELECT MAX(date) FROM files WHERE status='active'").fetchone()[0]
+
+    # Top 5 highest-signal arrivals from the last 7 days that have no
+    # metalogue_verdict annotation yet — what's worth your attention now.
+    fresh_top = conn.execute('''
+        SELECT f.date, f.session_id, cs.metalogue_score, cs.trajectory_shape, cs.best_preview
+        FROM conversation_signals cs
+        JOIN files f ON cs.file_id = f.id
+        WHERE f.date >= date('now', '-7 days')
+        AND f.id NOT IN (
+            SELECT file_id FROM annotations WHERE kind='metalogue_verdict'
+        )
+        ORDER BY cs.metalogue_score DESC
+        LIMIT 5
+    ''').fetchall()
+
+print(json.dumps({
+    "total_active": total,
+    "with_signals": with_sig,
+    "without_signals": no_sig,
+    "latest_date": max_date,
+    "fresh_top": [dict(r) for r in fresh_top],
+}))
+"""
+    result = subprocess.run(
+        ["python3", "-c", digest_code],
+        cwd=PROJECT_DIR,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"(digest query failed: {result.stderr.strip()})")
+        return
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(f"(digest parse failed: {result.stdout[:200]})")
+        return
+
+    print(f"Active files:    {data['total_active']}")
+    print(f"With signals:    {data['with_signals']}")
+    print(f"Without signals: {data['without_signals']}")
+    print(f"Latest in db:    {data['latest_date']}")
+
+    if data["fresh_top"]:
+        print("\nFresh high-signal conversations (last 7 days, unannotated):")
+        for row in data["fresh_top"]:
+            preview = (row["best_preview"] or "").strip().replace("\n", " ")
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            print(f"  [{row['date']}] score={row['metalogue_score']:>3} "
+                  f"{row['trajectory_shape']:<10} {row['session_id'][:8]}")
+            if preview:
+                print(f"    └─ {preview}")
+    else:
+        print("\nNo fresh high-signal conversations to surface.")
+    print("=" * 60)
 
 
 def main():
@@ -239,6 +354,9 @@ def main():
 
         if not new_files:
             print("\nNo new conversations to import.")
+            # Still show the digest — manual workflow expects every `make ingest`
+            # to end in a view of the corpus, not silence.
+            print_digest()
             return
 
         # Preview new files
@@ -257,6 +375,10 @@ def main():
         copied = copy_to_corpus(new_files)
         print(f"Copied {copied} files")
 
+        # Track the oldest new-file date so the signals step can scope its work
+        # tightly. Falls back to None (full corpus) if no date could be parsed.
+        signals_since = oldest_date_in(new_files)
+
         # Update state
         state = load_state()
         state["last_ingest"] = datetime.now().isoformat()
@@ -265,7 +387,10 @@ def main():
 
     # Run pipeline
     if not args.skip_pipeline:
-        run_pipeline()
+        run_pipeline(since=signals_since)
+
+    # Show what arrived
+    print_digest()
 
     print("\nDone!")
 
