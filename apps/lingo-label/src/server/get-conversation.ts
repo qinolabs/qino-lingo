@@ -4,6 +4,12 @@
  * Supports two modes:
  * - Queue mode: id is pending_labels.id (no labelId)
  * - Edit mode: id is files.id, labelId is labels.id
+ *
+ * After Chunk 1 (filename-as-FK), every dependent-table query joins
+ * via filename instead of files.id. files.id still exists as the
+ * autoincrement primary key, so the route param stays an integer in
+ * edit mode — but the moment we have the file row, downstream lookups
+ * (labels, noise predictions) all key off filename.
  */
 
 import { createServerFn } from "@tanstack/react-start";
@@ -72,7 +78,12 @@ function parseConversation(content: string): ConversationTurn[] {
 }
 
 /**
- * Find the conversation file, checking both corpus root and _noise subdirectory
+ * Find the conversation file in the corpus.
+ *
+ * Note: after Chunk 2 (collapse `_noise/`) all conversations live at the
+ * top level of the corpus dir. The legacy `_noise/` fallback below
+ * exists for the in-between window where some files still live there;
+ * once Chunk 2 lands and `_noise/` is gone, the fallback can be removed.
  */
 function findConversationFile(corpusDir: string, filename: string): string {
   const filePath = join(corpusDir, filename);
@@ -99,7 +110,6 @@ export const getConversation = createServerFn({ method: "GET" })
     const db = getDb();
     const corpusDir = getCorpusDir();
 
-    let fileId: number;
     let filename: string;
     let turnStart: number | null = null;
     let turnEnd: number | null = null;
@@ -113,9 +123,10 @@ export const getConversation = createServerFn({ method: "GET" })
     } | null = null;
 
     if (data.labelId !== undefined) {
-      // Edit mode: id is files.id, labelId is labels.id
-      // Show FULL conversation (don't filter by turn range)
-      fileId = Number(data.id);
+      // Edit mode: id is files.id (autoincrement PK still exists),
+      // labelId is labels.id. Show FULL conversation (don't filter by
+      // turn range).
+      const fileId = Number(data.id);
 
       const [file] = await db
         .select({ filename: schema.files.filename })
@@ -148,23 +159,17 @@ export const getConversation = createServerFn({ method: "GET" })
       // Queue mode: id is pending_labels.id
       const [pending] = await db
         .select({
-          fileId: schema.pendingLabels.fileId,
+          filename: schema.pendingLabels.filename,
           turnStart: schema.pendingLabels.turnStart,
           turnEnd: schema.pendingLabels.turnEnd,
-          filename: schema.files.filename,
         })
         .from(schema.pendingLabels)
-        .innerJoin(
-          schema.files,
-          eq(schema.pendingLabels.fileId, schema.files.id)
-        )
         .where(eq(schema.pendingLabels.id, Number(data.id)));
 
       if (!pending) {
         throw new Error(`Pending label ${data.id} not found`);
       }
 
-      fileId = pending.fileId;
       filename = pending.filename;
       turnStart = pending.turnStart;
       turnEnd = pending.turnEnd;
@@ -180,11 +185,11 @@ export const getConversation = createServerFn({ method: "GET" })
       turns = turns.slice(turnStart, turnEnd + 1);
     }
 
-    // Get existing labels for this file
+    // Get existing labels for this file (joined by filename, the new FK target)
     const existingLabels = await db
       .select()
       .from(schema.labels)
-      .where(eq(schema.labels.fileId, fileId));
+      .where(eq(schema.labels.filename, filename));
 
     // Get available markers
     const availableMarkers = await db.select().from(schema.markers);
@@ -199,7 +204,7 @@ export const getConversation = createServerFn({ method: "GET" })
         mlIsNoise: schema.noisePredictions.mlIsNoise,
       })
       .from(schema.noisePredictions)
-      .where(eq(schema.noisePredictions.fileId, fileId));
+      .where(eq(schema.noisePredictions.filename, filename));
 
     // Create a map for quick lookup
     const noiseByTurn = new Map(noisePredictions.map((p) => [p.turnIdx, p]));
@@ -222,7 +227,6 @@ export const getConversation = createServerFn({ method: "GET" })
 
     return {
       id: data.id,
-      fileId,
       filename,
       turns: turnsWithNoise,
       existingLabels,

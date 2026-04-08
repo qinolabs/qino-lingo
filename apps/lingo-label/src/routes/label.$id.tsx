@@ -304,7 +304,7 @@ function LabelPage() {
     const result = await submitLabel({
       data: {
         id: conversation.id,
-        fileId: conversation.fileId,
+        filename: conversation.filename,
         rating,
         tags: selectedTags,
         notes,
@@ -324,7 +324,7 @@ function LabelPage() {
     const result = await submitLabel({
       data: {
         id: conversation.id,
-        fileId: conversation.fileId,
+        filename: conversation.filename,
         rating: 1,
         tags: ["noise"],
         notes: notes ? `[NOISE] ${notes}` : "[NOISE]",

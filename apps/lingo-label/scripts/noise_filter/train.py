@@ -94,9 +94,9 @@ def load_training_data(db_path: str, corpus_dir: str) -> tuple[list[str], list[i
 
     # Get noise labels (notes contains [NOISE])
     cursor.execute("""
-        SELECT l.file_id, l.turn_start, l.turn_end, l.notes, f.filename, f.source_path
+        SELECT l.turn_start, l.turn_end, l.notes, f.filename, f.source_path
         FROM labels l
-        JOIN files f ON l.file_id = f.id
+        JOIN files f ON l.filename = f.filename
         WHERE l.notes LIKE '%[NOISE]%'
     """)
     noise_labels = cursor.fetchall()
@@ -104,9 +104,9 @@ def load_training_data(db_path: str, corpus_dir: str) -> tuple[list[str], list[i
 
     # Get signal labels (rich conversations, rating = 3)
     cursor.execute("""
-        SELECT l.file_id, l.turn_start, l.turn_end, l.notes, f.filename, f.source_path
+        SELECT l.turn_start, l.turn_end, l.notes, f.filename, f.source_path
         FROM labels l
-        JOIN files f ON l.file_id = f.id
+        JOIN files f ON l.filename = f.filename
         WHERE l.rating = 3 AND (l.notes IS NULL OR l.notes NOT LIKE '%[NOISE]%')
     """)
     signal_labels = cursor.fetchall()

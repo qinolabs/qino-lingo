@@ -1,19 +1,25 @@
 /**
  * Drizzle schema for corpus.db
  *
- * Matches the existing schema in qino-lingo/corpus.db
+ * Mirrors the canonical schema in qino-lingo/python/qino_lingo/migrations/.
+ * Schema authority lives in db.py + the migration files; this file is a
+ * hand-maintained mirror updated when migrations land. After Chunk 1
+ * (filename-as-FK), every dependent table FKs on filename instead of
+ * file_id, and files.session_id was renamed to claude_session_id.
  */
 
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 
 // ============================================================================
-// Core Tables (existing in corpus.db)
+// Core Tables
 // ============================================================================
 
 export const files = sqliteTable("files", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   filename: text("filename").notNull().unique(),
-  sessionId: text("session_id"),
+  // Truncated id from claude-extract; collision-prone, see Stage B notes
+  // in implementations/persistence-layer/01-holistic-refactor.md
+  claudeSessionId: text("claude_session_id"),
   date: text("date"),
   isAgent: integer("is_agent", { mode: "boolean" }),
   fileSize: integer("file_size"),
@@ -33,9 +39,9 @@ export const files = sqliteTable("files", {
 
 export const labels = sqliteTable("labels", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  fileId: integer("file_id")
+  filename: text("filename")
     .notNull()
-    .references(() => files.id),
+    .references(() => files.filename, { onUpdate: "cascade" }),
   turnStart: integer("turn_start"),
   turnEnd: integer("turn_end"),
   rating: integer("rating").notNull(), // 1=thin, 2=functional, 3=rich
@@ -56,9 +62,9 @@ export const examples = sqliteTable("examples", {
   markerId: integer("marker_id")
     .notNull()
     .references(() => markers.id),
-  fileId: integer("file_id")
+  filename: text("filename")
     .notNull()
-    .references(() => files.id),
+    .references(() => files.filename, { onUpdate: "cascade" }),
   turnStart: integer("turn_start"),
   turnEnd: integer("turn_end"),
   excerpt: text("excerpt"),
@@ -67,14 +73,14 @@ export const examples = sqliteTable("examples", {
 });
 
 // ============================================================================
-// Tables for qino-label (already exist in corpus.db)
+// Tables for qino-label
 // ============================================================================
 
 export const pendingLabels = sqliteTable("pending_labels", {
   id: integer("id").primaryKey(),
-  fileId: integer("file_id")
+  filename: text("filename")
     .notNull()
-    .references(() => files.id),
+    .references(() => files.filename, { onUpdate: "cascade" }),
   turnStart: integer("turn_start"),
   turnEnd: integer("turn_end"),
   source: text("source").default("manual"),
@@ -98,9 +104,9 @@ export const modelFeedback = sqliteTable("model_feedback", {
 
 export const noisePredictions = sqliteTable("noise_predictions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  fileId: integer("file_id")
+  filename: text("filename")
     .notNull()
-    .references(() => files.id),
+    .references(() => files.filename, { onUpdate: "cascade" }),
   turnIdx: integer("turn_idx").notNull(),
   // Deterministic filter results
   deterministicIsNoise: integer("deterministic_is_noise", { mode: "boolean" }),

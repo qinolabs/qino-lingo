@@ -3,6 +3,12 @@
  *
  * Reads from the qino-lingo corpus.db file.
  * Path configured via CORPUS_DB_PATH environment variable.
+ *
+ * Schema authority lives in qino-lingo/python/qino_lingo/migrations/.
+ * This file no longer contains defensive `CREATE TABLE IF NOT EXISTS`
+ * blocks — those existed before there was a real migration runner and
+ * created drift between three different sources of schema truth. After
+ * Chunk 1, all schema work goes through `make migrate`.
  */
 
 import Database from "better-sqlite3";
@@ -31,50 +37,10 @@ export function getDb() {
 
   sqliteDb = new Database(dbPath);
 
-  // Ensure pending_labels table exists
-  sqliteDb.exec(`
-    CREATE TABLE IF NOT EXISTS pending_labels (
-      id INTEGER PRIMARY KEY,
-      file_id INTEGER NOT NULL,
-      turn_start INTEGER,
-      turn_end INTEGER,
-      source TEXT DEFAULT 'manual',
-      context TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (file_id) REFERENCES files(id)
-    )
-  `);
-
-  // Ensure model_feedback table exists (Phase 2)
-  sqliteDb.exec(`
-    CREATE TABLE IF NOT EXISTS model_feedback (
-      id INTEGER PRIMARY KEY,
-      prompt TEXT NOT NULL,
-      model_response TEXT NOT NULL,
-      rating INTEGER,
-      preferred_response TEXT,
-      notes TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // Ensure noise_predictions table exists (for hybrid noise filter)
-  sqliteDb.exec(`
-    CREATE TABLE IF NOT EXISTS noise_predictions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      file_id INTEGER NOT NULL,
-      turn_idx INTEGER NOT NULL,
-      deterministic_is_noise INTEGER,
-      deterministic_reason TEXT,
-      ml_score REAL,
-      ml_is_noise INTEGER,
-      human_label INTEGER,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT,
-      FOREIGN KEY (file_id) REFERENCES files(id),
-      UNIQUE(file_id, turn_idx)
-    )
-  `);
+  // Enforce foreign keys per-connection. SQLite ignores FK declarations
+  // unless this is set on every connection. Without it, the FK rebuild
+  // from Chunk 1 is documentation that lies.
+  sqliteDb.pragma("foreign_keys = ON");
 
   db = drizzle(sqliteDb, { schema });
   return db;

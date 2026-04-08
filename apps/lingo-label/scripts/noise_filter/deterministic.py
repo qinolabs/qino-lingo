@@ -184,29 +184,16 @@ def run_deterministic_filter(db_path: str, corpus_dir: str, dry_run: bool = Fals
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # Schema authority for noise_predictions lives in
+    # python/qino_lingo/migrations/. After Chunk 1 the table FKs on
+    # filename instead of file_id; this script trusts the migration has
+    # been applied via `make migrate` and does not redefine the table.
+    conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
-
-    # Ensure noise_predictions table exists
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS noise_predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id INTEGER NOT NULL,
-            turn_idx INTEGER NOT NULL,
-            deterministic_is_noise INTEGER,
-            deterministic_reason TEXT,
-            ml_score REAL,
-            ml_is_noise INTEGER,
-            human_label INTEGER,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT,
-            FOREIGN KEY (file_id) REFERENCES files(id),
-            UNIQUE(file_id, turn_idx)
-        )
-    """)
 
     # Get all files
     cursor.execute("""
-        SELECT id, filename, source_path
+        SELECT filename, source_path
         FROM files
         WHERE status = 'active'
     """)
@@ -222,7 +209,6 @@ def run_deterministic_filter(db_path: str, corpus_dir: str, dry_run: bool = Fals
     }
 
     for file_row in files:
-        file_id = file_row["id"]
         filename = file_row["filename"]
         source_path = file_row["source_path"]
 
@@ -256,14 +242,14 @@ def run_deterministic_filter(db_path: str, corpus_dir: str, dry_run: bool = Fals
                     # Insert or update prediction
                     cursor.execute("""
                         INSERT INTO noise_predictions
-                            (file_id, turn_idx, deterministic_is_noise, deterministic_reason, created_at)
+                            (filename, turn_idx, deterministic_is_noise, deterministic_reason, created_at)
                         VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(file_id, turn_idx) DO UPDATE SET
+                        ON CONFLICT(filename, turn_idx) DO UPDATE SET
                             deterministic_is_noise = excluded.deterministic_is_noise,
                             deterministic_reason = excluded.deterministic_reason,
                             updated_at = ?
                     """, (
-                        file_id, turn_idx, 1, reason,
+                        filename, turn_idx, 1, reason,
                         datetime.now().isoformat(),
                         datetime.now().isoformat()
                     ))

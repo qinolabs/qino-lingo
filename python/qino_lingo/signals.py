@@ -346,95 +346,70 @@ def analyze_conversation(filepath: Path) -> Optional[ConversationSignals]:
 # --- Database storage ---
 
 
-_CREATE_SIGNALS_TABLE = """
-CREATE TABLE IF NOT EXISTS conversation_signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id INTEGER UNIQUE NOT NULL,
-    metalogue_score INTEGER,
-    concept_density REAL,
-    reflective_turns INTEGER,
-    reflective_words INTEGER,
-    rich_turns INTEGER,
-    medium_rich_turns INTEGER,
-    very_rich_turns INTEGER,
-    corrections INTEGER,
-    meta_awareness INTEGER,
-    cross_diversity INTEGER,
-    terse_ratio REAL,
-    trajectory_shape TEXT,
-    concept_keywords TEXT,
-    best_preview TEXT,
-    computed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    algorithm_version TEXT,
-    FOREIGN KEY (file_id) REFERENCES files(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_signals_score
-    ON conversation_signals(metalogue_score DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_file
-    ON conversation_signals(file_id);
-"""
-
-_CREATE_ANNOTATIONS_TABLE = """
-CREATE TABLE IF NOT EXISTS annotations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id INTEGER NOT NULL,
-    exchange_start INTEGER,
-    exchange_end INTEGER,
-    kind TEXT NOT NULL,
-    value TEXT,
-    thread TEXT,
-    notes TEXT,
-    source TEXT DEFAULT 'human',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (file_id) REFERENCES files(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_annotations_file ON annotations(file_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_kind ON annotations(kind);
-CREATE INDEX IF NOT EXISTS idx_annotations_thread ON annotations(thread);
-"""
-
-_CREATE_SESSION_INDEX = """
-CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
-"""
-
-
 def init_signal_tables(db_path: Path = DEFAULT_DB_PATH):
-    """Create the conversation_signals and annotations tables if needed."""
-    with get_connection(db_path) as conn:
-        conn.executescript(_CREATE_SIGNALS_TABLE)
-        conn.executescript(_CREATE_ANNOTATIONS_TABLE)
-        conn.executescript(_CREATE_SESSION_INDEX)
+    """No-op retained for backwards compatibility.
+
+    After Chunk 1 the canonical schema lives in
+    python/qino_lingo/migrations/02-rebuild-fk-tables.sql. Both
+    conversation_signals and annotations tables are created (and FK-
+    rebuilt) by the migration runner. Callers like the MCP server still
+    invoke this function on startup as a defensive no-op.
+    """
+    return None
 
 
 def store_signals(
     signals: ConversationSignals,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> bool:
-    """Store or update signals for a conversation. Returns True if stored."""
+    """Store or update signals for a conversation. Returns True if stored.
+
+    Uses UPSERT on the filename FK target. After Chunk 1 the
+    conversation_signals.filename column has UNIQUE NOT NULL with a
+    cascade-update FK to files(filename), so the upsert is the natural
+    write pattern: it preserves the existing row's id (which has no
+    semantic meaning) while replacing all signal fields.
+    """
     with get_connection(db_path) as conn:
-        # Look up file_id from filename
+        # Verify the parent file exists. After Chunk 1, FK enforcement
+        # would refuse the insert anyway, but checking here lets us
+        # return False gracefully instead of raising IntegrityError.
         row = conn.execute(
-            "SELECT id FROM files WHERE filename = ?", (signals.filename,)
+            "SELECT 1 FROM files WHERE filename = ?", (signals.filename,)
         ).fetchone()
         if not row:
             return False
-        file_id = row[0]
 
         conn.execute(
             """
-            INSERT OR REPLACE INTO conversation_signals (
-                file_id, metalogue_score, concept_density,
+            INSERT INTO conversation_signals (
+                filename, metalogue_score, concept_density,
                 reflective_turns, reflective_words,
                 rich_turns, medium_rich_turns, very_rich_turns,
                 corrections, meta_awareness, cross_diversity,
                 terse_ratio, trajectory_shape, concept_keywords,
                 best_preview, computed_at, algorithm_version
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(filename) DO UPDATE SET
+                metalogue_score = excluded.metalogue_score,
+                concept_density = excluded.concept_density,
+                reflective_turns = excluded.reflective_turns,
+                reflective_words = excluded.reflective_words,
+                rich_turns = excluded.rich_turns,
+                medium_rich_turns = excluded.medium_rich_turns,
+                very_rich_turns = excluded.very_rich_turns,
+                corrections = excluded.corrections,
+                meta_awareness = excluded.meta_awareness,
+                cross_diversity = excluded.cross_diversity,
+                terse_ratio = excluded.terse_ratio,
+                trajectory_shape = excluded.trajectory_shape,
+                concept_keywords = excluded.concept_keywords,
+                best_preview = excluded.best_preview,
+                computed_at = CURRENT_TIMESTAMP,
+                algorithm_version = excluded.algorithm_version
             """,
             (
-                file_id,
+                signals.filename,
                 signals.metalogue_score,
                 signals.concept_density,
                 signals.reflective_turns,

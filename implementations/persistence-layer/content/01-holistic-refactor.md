@@ -330,19 +330,66 @@ schema decision.
 - [x] Add `make migrate` to Makefile
 
 **Identity, Stage A — interim (filename as FK target)**
-- [ ] Migration 01: rename `files.session_id` → `files.claude_session_id`
-      (truncated form, kept for now). Update Python and Drizzle reads.
-- [ ] Migration 02: add `filename TEXT NOT NULL` to every dependent table
-      (`conversation_signals`, `noise_predictions`, `pending_labels`,
-      `calibration_items`, `labels`, `examples`)
-- [ ] Migration 03: backfill new `filename` columns by joining through
-      current `file_id` (post-heal, all live data is reachable)
-- [ ] Migration 04: add new FK declarations on `filename`, drop old
-      `file_id INTEGER` columns
-- [ ] Update `signals.py::store_signals` to use proper UPSERT and to write
-      `filename` instead of `file_id`
-- [ ] Update `mcp-server/server.py` queries to join on `filename`
-- [ ] Update `lingo-label` Drizzle schema (regenerate via `pnpm db:pull`)
+- [x] Migration `01-rename-session-id.sql`: rename `files.session_id` →
+      `files.claude_session_id` (truncated form, kept for now). Index
+      renamed to `idx_files_claude_session`.
+- [x] Migration `02-rebuild-fk-tables.sql`: rebuild-and-rename for all 7
+      dependent tables in a single transaction (`conversation_signals`,
+      `noise_predictions`, `pending_labels`, `calibration_items`,
+      `labels`, `examples`, `annotations`). Filename FK with
+      `ON UPDATE CASCADE` and `ON DELETE NO ACTION` (default). The
+      4-migration plan from the original Why was collapsed to 2 because
+      add-column / backfill / drop-column / add-FK is awkward in SQLite;
+      one rebuild-and-rename per table is the natural unit.
+- [x] Update `signals.py::store_signals` to use proper UPSERT (filename
+      as the conflict target) and remove `init_signal_tables` DDL —
+      schema authority is the migration runner now.
+- [x] Update `db.py`: rename `extract_session_id` →
+      `extract_claude_session_id`, switch all FK joins to filename,
+      change `add_label` / `add_example` / `add_annotation` /
+      `update_file_status` parameters from `file_id: int` to
+      `filename: str`. `get_file_by_session` accepts either filename
+      (preferred, ends in `.md`) or claude_session_id (fallback).
+- [x] Update `mcp-server/server.py` queries to join on filename. Public
+      API parameter name `session_id` kept for backwards compatibility;
+      it now resolves to filename or claude_session_id internally.
+      Result objects still expose `"session_id"` mapped from the
+      `claude_session_id` column.
+- [x] Update `calibrate.py` (BASE_QUERY joins, calibration_items insert,
+      label callsite). `ensure_tables` is now a no-op.
+- [x] Update `characterize.py` (STRATEGIES joins, `store_result`
+      parameter, callsite).
+- [x] Update `sync.py` — minimally edited and quarantined; the remote
+      qino-label D1 backend has not been migrated, so calibration sync
+      is documented as broken until calibration is revived.
+- [x] Update `sampler.py` (joins + `get_labeling_progress` count).
+- [x] Update `lingo-label` Drizzle schema by hand (no `drizzle.config.ts`
+      yet, so `pnpm db:pull` deferred). schema.ts now uses filename FK
+      references on labels, examples, pending_labels, noise_predictions.
+- [x] Delete inline `CREATE TABLE IF NOT EXISTS` blocks in
+      `apps/lingo-label/src/server/db.ts`. Added
+      `pragma("foreign_keys = ON")` so the lingo-label app respects FK
+      enforcement (it didn't before).
+- [x] Update lingo-label server functions: `get-conversation.ts`,
+      `get-queue.ts`, `get-labels.ts`, `submit-label.ts`,
+      `queue-actions.ts`. The submit-label form now sends `filename`
+      instead of `fileId`. `get-labels` keeps a `fileId` field in its
+      response (sourced from `files.id` via the join) only because
+      `LabeledTab` links to the edit-mode route which keys on
+      `files.id`; the autoincrement PK still exists, just no longer
+      participates in cross-table FKs.
+- [x] Update `src/types.ts` (FileRecord, PendingLabel, Label, Example,
+      QueueItem). Caught and fixed a pre-existing type lie:
+      `Label.isRich: boolean` didn't match the actual `rating: integer`
+      column.
+- [x] Update `src/routes/label.$id.tsx` (`fileId` → `filename` in
+      submit calls).
+- [x] Update batch scripts: `apps/lingo-label/scripts/noise_filter/`
+      (`deterministic.py`, `inference.py`, `train.py`) and
+      `training/validations/lib/` (`export.py`, `types.py`). Removed
+      the inline `CREATE TABLE` block from `deterministic.py` (schema
+      authority is the migration runner now). All scripts pass FK
+      enforcement.
 
 **Identity, Stage B — capture full Claude UUIDs (separate sub-iteration)**
 - [ ] Modify `ingest_conversations.py::filter_by_folder` to capture the full
@@ -524,6 +571,83 @@ chosen path.)
 
 (To be filled in after the iteration completes. Capture surprises,
 incidents, and things that should change the next iteration's approach.)
+
+### Chunk 1 — Stage A migrations + consumer updates (landed 2026-04-08)
+
+- **Two migrations, not four.** The original plan called for four
+  separate migrations (rename, add column, backfill, drop+FK). In
+  practice the SQLite-natural unit is one rebuild-and-rename per table,
+  and combining all 7 rebuilds in a single transaction is *more* atomic
+  than splitting them, not less. Migration runner already wraps each
+  migration in a transaction; one combined migration = one transaction
+  = all-or-nothing. Final shape: `01-rename-session-id.sql` (trivial)
+  and `02-rebuild-fk-tables.sql` (~330 lines, single transaction).
+- **Filename-as-FK is stronger than expected.** The dry-run revealed
+  a counter-intuitive fact: with `ON DELETE NO ACTION` (default), an
+  `INSERT OR REPLACE INTO files` does NOT orphan dependent rows.
+  SQLite's FK check is per-statement, not per-operation: at end of
+  statement, every dependent row has a parent with the same filename
+  (the new row), so the intermediate "delete" inside REPLACE is
+  invisible to the checker. With `file_id` as the FK target, the same
+  pattern was destructive because the new row got a new autoincrement
+  id. So filename-as-FK eliminates the orphaning class entirely:
+  - Proper UPSERT (Chunk 0 pattern): works, dependents preserved.
+  - INSERT OR REPLACE on same filename: works, dependents preserved
+    (the surprise — caught by behavioral test in dry-run).
+  - Explicit DELETE FROM files with children present: blocked with
+    constraint error 19 (correct: forced cleanup).
+- **`ON DELETE CASCADE` was the wrong instinct.** First-draft migration
+  used CASCADE; behavioral test showed it cascade-deleted dependent
+  rows on REPLACE — *amplifying* the original bug instead of fixing
+  it. This is exactly what dry-runs are for. Switched to NO ACTION
+  (default) and the behavior inverted to correct.
+- **Consumer surface area was bigger than the iteration plan listed.**
+  Plan named signals.py, mcp-server, and lingo-label Drizzle. Reality:
+  also calibrate.py, characterize.py, sync.py, sampler.py, six lingo-
+  label server fns, types.ts, two routes, and four batch scripts in
+  noise_filter/ and training/validations/. Catching all of them in one
+  session was feasible because each edit was small (~5–20 lines), but
+  a future iteration with more code surface should plan a 2-session
+  split (backend / frontend) by default.
+- **MCP public API kept stable.** The MCP server's tool signatures
+  use `session_id` as a parameter name. Renaming this would break
+  existing user workflows (the user passes `session_id` from search
+  results to subsequent tool calls). The internal column is now
+  `claude_session_id`; the parameter name is preserved as an external
+  contract. `get_file_by_session` is now a smart resolver: if the
+  input ends in `.md` it looks up by filename (the stable, unique
+  identifier — preferred); otherwise it falls back to
+  `claude_session_id`, which is collision-prone (35 collision groups
+  in current corpus, returns first match arbitrarily). Stage B fixes
+  the collision class by capturing full Claude UUIDs.
+- **Two pre-existing bugs caught and fixed alongside the migration.**
+  (1) `mcp-server/server.py::get` view="thinking" referenced
+  `density` outside its conditional assignment scope — would
+  `NameError` on conversations without signals. (2) `apps/lingo-label/
+  src/types.ts::Label` declared `isRich: boolean` but the actual
+  column is `rating: integer`. Both type-level lies that hadn't
+  surfaced because no caller exercised them. Fixed during the
+  migration sweep because they were in the same files.
+- **`apps/lingo-label/src/server/db.ts` now has `foreign_keys = ON`.**
+  It didn't before. This was a silent gap where the lingo-label app
+  was reading from the same db as everything else but FK enforcement
+  wasn't on for its connections. Without this fix, the structural
+  guarantees from Chunk 1 would only have applied to Python writes.
+- **Coverage gap surfaced (deferred to Chunk 4).** 736 of 1773 active
+  files have no `conversation_signals` row. The migration left this
+  state untouched (the rebuilds just preserved what was there). This
+  is exactly what `make doctor` is meant to catch.
+- **`sync.py` quarantined, not removed.** The calibration sync flow
+  pushes to a remote D1 backend that has its own (unmigrated) schema.
+  After Chunk 1, the local payload's `fileId` field carries a filename
+  string instead of an integer id, which the remote will not accept.
+  Module compiles against the new schema but is documented as broken
+  until calibration is revived as its own iteration.
+- **Verification: `make digest` end-to-end.** 1773 active files, 1037
+  with signals, 736 without (Chunk 4 territory), top-5 fresh
+  high-signal arrivals all rendering correctly with `claude_session_id`
+  in the output. `PRAGMA foreign_key_check` empty. `pnpm typecheck`
+  for lingo-label clean.
 
 ### Chunk 0 — Migration runner (landed 2026-04-08)
 

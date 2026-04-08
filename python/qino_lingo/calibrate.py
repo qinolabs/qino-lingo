@@ -36,36 +36,14 @@ CORPUS_DIR = Path(__file__).parent.parent.parent / "data" / "corpus"
 # --- Schema ---
 
 def ensure_tables(db_path: Path = DEFAULT_DB_PATH):
-    """Create calibration tables if they don't exist."""
-    with get_connection(db_path) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS calibration_rounds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                theme_key TEXT NOT NULL,
-                theme_name TEXT NOT NULL,
-                theme_description TEXT,
-                sample_query TEXT,
-                status TEXT DEFAULT 'open',
-                interpretation TEXT,
-                next_theme_suggestion TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                completed_at TEXT
-            );
+    """No-op retained for backwards compatibility.
 
-            CREATE TABLE IF NOT EXISTS calibration_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                round_id INTEGER NOT NULL,
-                file_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                excerpt TEXT,
-                label_id INTEGER,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (round_id) REFERENCES calibration_rounds(id),
-                FOREIGN KEY (file_id) REFERENCES files(id),
-                FOREIGN KEY (label_id) REFERENCES labels(id),
-                UNIQUE(round_id, file_id)
-            );
-        """)
+    After Chunk 1 the canonical schema for calibration_rounds and
+    calibration_items lives in python/qino_lingo/migrations/. The
+    rebuild migration switched calibration_items.file_id to
+    calibration_items.filename. Callers retained for compatibility.
+    """
+    return None
 
 
 # --- Theme Registry ---
@@ -193,8 +171,8 @@ BASE_WHERE = (
 
 BASE_QUERY = """
     SELECT f.* FROM files f
-    LEFT JOIN calibration_items ci ON f.id = ci.file_id
-    LEFT JOIN labels l ON f.id = l.file_id
+    LEFT JOIN calibration_items ci ON f.filename = ci.filename
+    LEFT JOIN labels l ON f.filename = l.filename
     WHERE {base_where}
       AND {where_clause}
     ORDER BY {order_by}
@@ -240,9 +218,9 @@ def _sample_composite(
             rows = conn.execute(query, (pool.limit,)).fetchall()
             for r in rows:
                 row = dict(r)
-                if row['id'] not in seen_ids:
+                if row['filename'] not in seen_ids:
                     all_rows.append(row)
-                    seen_ids.add(row['id'])
+                    seen_ids.add(row['filename'])
 
     return all_rows, "\n---\n".join(queries)
 
@@ -251,8 +229,8 @@ def count_eligible(theme: Theme, db_path: Path = DEFAULT_DB_PATH) -> int:
     """Count eligible conversations for a theme."""
     count_template = """
         SELECT COUNT(*) FROM files f
-        LEFT JOIN calibration_items ci ON f.id = ci.file_id
-        LEFT JOIN labels l ON f.id = l.file_id
+        LEFT JOIN calibration_items ci ON f.filename = ci.filename
+        LEFT JOIN labels l ON f.filename = l.filename
         WHERE {base_where}
           AND {where_clause}
     """
@@ -408,9 +386,9 @@ def create_round(
 
             conn.execute("""
                 INSERT INTO calibration_items
-                    (round_id, file_id, position, excerpt)
+                    (round_id, filename, position, excerpt)
                 VALUES (?, ?, ?, ?)
-            """, (round_id, file_row['id'], position, excerpt))
+            """, (round_id, file_row['filename'], position, excerpt))
 
     console.print(f"\n[green]Created round #{round_id}[/green]: {theme.name}")
     console.print(f"  {len(rows)} conversations sampled\n")
@@ -448,7 +426,7 @@ def present_round(
                        f.dialogue_density, f.date,
                        l.rating as label_rating
                 FROM calibration_items ci
-                JOIN files f ON ci.file_id = f.id
+                JOIN files f ON ci.filename = f.filename
                 LEFT JOIN labels l ON ci.label_id = l.id
                 WHERE ci.round_id = ? AND ci.position = ?
             """, (round_id, item_position)).fetchall()
@@ -459,7 +437,7 @@ def present_round(
                        f.dialogue_density, f.date,
                        l.rating as label_rating
                 FROM calibration_items ci
-                JOIN files f ON ci.file_id = f.id
+                JOIN files f ON ci.filename = f.filename
                 LEFT JOIN labels l ON ci.label_id = l.id
                 WHERE ci.round_id = ?
                 ORDER BY ci.position
@@ -554,7 +532,7 @@ def label_conversation(
 
     # Add label via db.add_label (idempotent)
     label_id = add_label(
-        file_id=item['file_id'],
+        filename=item['filename'],
         rating=rating,
         tags=tag_list,
         notes=notes,
@@ -618,7 +596,7 @@ def interpret_round(round_id: int, db_path: Path = DEFAULT_DB_PATH):
                    f.has_reflective_language, f.dialogue_density,
                    l.rating, l.tags
             FROM calibration_items ci
-            JOIN files f ON ci.file_id = f.id
+            JOIN files f ON ci.filename = f.filename
             LEFT JOIN labels l ON ci.label_id = l.id
             WHERE ci.round_id = ?
             ORDER BY ci.position

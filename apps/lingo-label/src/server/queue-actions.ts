@@ -1,5 +1,8 @@
 /**
  * Server functions for queue management actions
+ *
+ * After Chunk 1, the dependent tables FK on filename instead of file_id.
+ * The raw SQL queries below select and insert filename strings throughout.
  */
 
 import { createServerFn } from "@tanstack/react-start";
@@ -19,59 +22,59 @@ export const queueConversations = createServerFn({ method: "POST" })
     const db = getDb();
     const { action, limit, noiseType } = data;
 
-    let fileIds: number[] = [];
+    let filenames: string[] = [];
 
     if (action === "clean") {
       // Conversations with NO noise predictions (cleanest signal)
-      const results = await db.all<{ id: number }>(sql`
-        SELECT f.id
+      const results = await db.all<{ filename: string }>(sql`
+        SELECT f.filename
         FROM files f
         WHERE f.status = 'active'
-          AND f.id NOT IN (SELECT DISTINCT file_id FROM noise_predictions WHERE deterministic_is_noise = 1)
-          AND f.id NOT IN (SELECT file_id FROM pending_labels)
-          AND f.id NOT IN (SELECT file_id FROM labels)
+          AND f.filename NOT IN (SELECT DISTINCT filename FROM noise_predictions WHERE deterministic_is_noise = 1)
+          AND f.filename NOT IN (SELECT filename FROM pending_labels)
+          AND f.filename NOT IN (SELECT filename FROM labels)
         ORDER BY RANDOM()
         LIMIT ${limit}
       `);
-      fileIds = results.map((r) => r.id);
+      filenames = results.map((r) => r.filename);
     } else if (action === "noisy") {
       // Conversations WITH noise predictions (for review)
-      const results = await db.all<{ id: number }>(sql`
-        SELECT DISTINCT np.file_id as id
+      const results = await db.all<{ filename: string }>(sql`
+        SELECT DISTINCT np.filename as filename
         FROM noise_predictions np
-        JOIN files f ON np.file_id = f.id
+        JOIN files f ON np.filename = f.filename
         WHERE f.status = 'active'
           AND np.deterministic_is_noise = 1
           ${noiseType ? sql`AND np.deterministic_reason = ${noiseType}` : sql``}
-          AND np.file_id NOT IN (SELECT file_id FROM pending_labels)
-          AND np.file_id NOT IN (SELECT file_id FROM labels)
+          AND np.filename NOT IN (SELECT filename FROM pending_labels)
+          AND np.filename NOT IN (SELECT filename FROM labels)
         ORDER BY RANDOM()
         LIMIT ${limit}
       `);
-      fileIds = results.map((r) => r.id);
+      filenames = results.map((r) => r.filename);
     } else {
       // Random from all active files
-      const results = await db.all<{ id: number }>(sql`
-        SELECT f.id
+      const results = await db.all<{ filename: string }>(sql`
+        SELECT f.filename
         FROM files f
         WHERE f.status = 'active'
-          AND f.id NOT IN (SELECT file_id FROM pending_labels)
-          AND f.id NOT IN (SELECT file_id FROM labels)
+          AND f.filename NOT IN (SELECT filename FROM pending_labels)
+          AND f.filename NOT IN (SELECT filename FROM labels)
         ORDER BY RANDOM()
         LIMIT ${limit}
       `);
-      fileIds = results.map((r) => r.id);
+      filenames = results.map((r) => r.filename);
     }
 
-    if (fileIds.length === 0) {
+    if (filenames.length === 0) {
       return { queued: 0, message: "No eligible conversations found" };
     }
 
     // Insert into pending_labels
     const now = new Date().toISOString();
-    for (const fileId of fileIds) {
+    for (const filename of filenames) {
       await db.insert(schema.pendingLabels).values({
-        fileId,
+        filename,
         source: "sampler",
         context: `${action}${noiseType ? `:${noiseType}` : ""}`,
         createdAt: now,
@@ -79,8 +82,8 @@ export const queueConversations = createServerFn({ method: "POST" })
     }
 
     return {
-      queued: fileIds.length,
-      message: `Queued ${fileIds.length} ${action} conversations`,
+      queued: filenames.length,
+      message: `Queued ${filenames.length} ${action} conversations`,
     };
   });
 
@@ -92,7 +95,7 @@ export const getNoiseBreakdown = createServerFn({ method: "GET" }).handler(
     const db = getDb();
 
     const results = await db.all<{ reason: string; count: number }>(sql`
-      SELECT deterministic_reason as reason, COUNT(DISTINCT file_id) as count
+      SELECT deterministic_reason as reason, COUNT(DISTINCT filename) as count
       FROM noise_predictions
       WHERE deterministic_is_noise = 1
       GROUP BY deterministic_reason

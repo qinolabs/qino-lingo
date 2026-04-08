@@ -79,7 +79,6 @@ class ValidationReport:
 @dataclass
 class LabeledTurn:
     """A labeled conversation turn."""
-    file_id: int
     filename: str
     turn_index: int
     role: str  # "human" or "assistant"

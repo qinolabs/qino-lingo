@@ -4,6 +4,10 @@
  * Supports both:
  * - Queue mode: creates new label and removes from pending queue
  * - Edit mode: updates existing label
+ *
+ * After Chunk 1, labels.filename is the FK target. The form posts the
+ * filename string (loaded from getConversation) instead of an integer
+ * file_id.
  */
 
 import { createServerFn } from "@tanstack/react-start";
@@ -13,7 +17,7 @@ import { getDb, schema } from "./db";
 
 const SubmitLabelSchema = z.object({
   id: z.string(),
-  fileId: z.number(),
+  filename: z.string(),
   rating: z.number().min(1).max(3), // 1=thin, 2=functional, 3=rich
   tags: z.array(z.string()), // Secondary tags
   notes: z.string(),
@@ -31,12 +35,12 @@ export const submitLabel = createServerFn({ method: "POST" })
     const existingLabelConditions =
       data.turnStart !== null && data.turnEnd !== null
         ? and(
-            eq(schema.labels.fileId, data.fileId),
+            eq(schema.labels.filename, data.filename),
             eq(schema.labels.turnStart, data.turnStart),
             eq(schema.labels.turnEnd, data.turnEnd)
           )
         : and(
-            eq(schema.labels.fileId, data.fileId),
+            eq(schema.labels.filename, data.filename),
             isNull(schema.labels.turnStart),
             isNull(schema.labels.turnEnd)
           );
@@ -62,7 +66,7 @@ export const submitLabel = createServerFn({ method: "POST" })
     } else {
       // Insert new label
       await db.insert(schema.labels).values({
-        fileId: data.fileId,
+        filename: data.filename,
         turnStart: data.turnStart,
         turnEnd: data.turnEnd,
         rating: data.rating,

@@ -1,5 +1,9 @@
 /**
  * Domain types for qino-label
+ *
+ * After Chunk 1 (filename-as-FK), the dependent-table types carry
+ * `filename` instead of `fileId`. files.id is still the autoincrement
+ * primary key but no longer participates in cross-table joins.
  */
 
 // ============================================================================
@@ -8,8 +12,8 @@
 
 export interface FileRecord {
   id: number;
-  sessionId: string | null;
   filename: string;
+  claudeSessionId: string | null;
   date: string | null;
   isAgent: boolean | null;
   fileSize: number | null;
@@ -29,7 +33,7 @@ export interface FileRecord {
 
 export interface PendingLabel {
   id: number;
-  fileId: number;
+  filename: string;
   turnStart: number | null;
   turnEnd: number | null;
   source: "skill" | "qino-model" | "manual" | "sampler";
@@ -39,10 +43,11 @@ export interface PendingLabel {
 
 export interface Label {
   id: number;
-  fileId: number;
+  filename: string;
   turnStart: number | null;
   turnEnd: number | null;
-  isRich: boolean;
+  rating: number;
+  tags: string | null;
   notes: string | null;
   createdAt: string | null;
 }
@@ -57,7 +62,7 @@ export interface Marker {
 export interface Example {
   id: number;
   markerId: number;
-  fileId: number;
+  filename: string;
   turnStart: number | null;
   turnEnd: number | null;
   excerpt: string | null;
@@ -83,7 +88,6 @@ export interface ConversationTurn {
 }
 
 export interface QueueItem extends PendingLabel {
-  filename: string;
   turnCount: number | null;
 }
 

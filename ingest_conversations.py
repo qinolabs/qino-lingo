@@ -253,19 +253,19 @@ with get_connection(Path('corpus.db')) as conn:
     no_sig = conn.execute('''
         SELECT COUNT(*) FROM files f
         WHERE f.status='active'
-        AND f.id NOT IN (SELECT file_id FROM conversation_signals)
+        AND f.filename NOT IN (SELECT filename FROM conversation_signals)
     ''').fetchone()[0]
     max_date = conn.execute("SELECT MAX(date) FROM files WHERE status='active'").fetchone()[0]
 
     # Top 5 highest-signal arrivals from the last 7 days that have no
     # metalogue_verdict annotation yet — what's worth your attention now.
     fresh_top = conn.execute('''
-        SELECT f.date, f.session_id, cs.metalogue_score, cs.trajectory_shape, cs.best_preview
+        SELECT f.date, f.claude_session_id, cs.metalogue_score, cs.trajectory_shape, cs.best_preview
         FROM conversation_signals cs
-        JOIN files f ON cs.file_id = f.id
+        JOIN files f ON cs.filename = f.filename
         WHERE f.date >= date('now', '-7 days')
-        AND f.id NOT IN (
-            SELECT file_id FROM annotations WHERE kind='metalogue_verdict'
+        AND f.filename NOT IN (
+            SELECT filename FROM annotations WHERE kind='metalogue_verdict'
         )
         ORDER BY cs.metalogue_score DESC
         LIMIT 5
@@ -307,7 +307,7 @@ print(json.dumps({
             if len(preview) > 120:
                 preview = preview[:117] + "..."
             print(f"  [{row['date']}] score={row['metalogue_score']:>3} "
-                  f"{row['trajectory_shape']:<10} {row['session_id'][:8]}")
+                  f"{row['trajectory_shape']:<10} {(row['claude_session_id'] or '')[:8]}")
             if preview:
                 print(f"    └─ {preview}")
     else:

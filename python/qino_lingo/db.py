@@ -31,14 +31,22 @@ def get_connection(db_path: Path = DEFAULT_DB_PATH):
 
 
 def init_db(db_path: Path = DEFAULT_DB_PATH):
-    """Initialize the database schema."""
+    """Initialize the database schema.
+
+    NOTE: as of Chunk 0 the canonical schema lives in
+    python/qino_lingo/migrations/. This function is retained for backwards
+    compatibility with any callers that previously initialized a fresh
+    db, but new schema work should be done as a numbered migration. The
+    DDL below is kept in sync with the post-Chunk-1 schema (filename as
+    FK target, claude_session_id as renamed identity column).
+    """
     with get_connection(db_path) as conn:
         conn.executescript("""
             -- Files table: one row per conversation file
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT UNIQUE NOT NULL,
-                session_id TEXT,  -- extracted from filename for stable identity
+                claude_session_id TEXT,  -- truncated id from claude-extract; collision-prone, see Stage B
                 date TEXT,
                 is_agent BOOLEAN,
                 file_size INTEGER,
@@ -59,14 +67,15 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
             -- Labels table: human judgments on conversation segments
             CREATE TABLE IF NOT EXISTS labels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
                 turn_start INTEGER,  -- NULL means whole conversation
                 turn_end INTEGER,
                 rating INTEGER NOT NULL,  -- 1=thin, 2=functional, 3=rich
                 tags TEXT,  -- JSON array of secondary tags
                 notes TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (file_id) REFERENCES files(id)
+                FOREIGN KEY (filename) REFERENCES files(filename)
+                    ON UPDATE CASCADE
             );
 
             -- Markers table: emergent vocabulary of epistemic patterns
@@ -81,32 +90,40 @@ def init_db(db_path: Path = DEFAULT_DB_PATH):
             CREATE TABLE IF NOT EXISTS examples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 marker_id INTEGER NOT NULL,
-                file_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
                 turn_start INTEGER,
                 turn_end INTEGER,
                 excerpt TEXT,
                 notes TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (marker_id) REFERENCES markers(id),
-                FOREIGN KEY (file_id) REFERENCES files(id)
+                FOREIGN KEY (filename) REFERENCES files(filename)
+                    ON UPDATE CASCADE
             );
 
             -- Create indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_files_date ON files(date);
             CREATE INDEX IF NOT EXISTS idx_files_substantive ON files(substantive_user_turns);
-            CREATE INDEX IF NOT EXISTS idx_labels_file ON labels(file_id);
+            CREATE INDEX IF NOT EXISTS idx_labels_filename ON labels(filename);
             CREATE INDEX IF NOT EXISTS idx_examples_marker ON examples(marker_id);
+            CREATE INDEX IF NOT EXISTS idx_examples_filename ON examples(filename);
         """)
 
 
-def extract_session_id(filename: str) -> Optional[str]:
-    """Extract session ID from filename for stable identity.
+def extract_claude_session_id(filename: str) -> Optional[str]:
+    """Extract the truncated Claude session id from a corpus filename.
 
-    Filename format: claude-conversation-YYYY-MM-DD-HHMMSS-XXXXX.md
-    Session ID: the unique suffix (HHMMSS-XXXXX or similar)
+    Filename format: claude-conversation-YYYY-MM-DD-XXXXXXXX.md
+    Returned id: the suffix after the date (the 8-hex truncation that
+    claude-extract emits, or `agent-XX` for sub-agent runs).
+
+    NOTE: this is collision-prone. 35 collision groups exist in the
+    current corpus (~294 duplicate rows). Stage B captures the full
+    Claude UUID at ingestion time and stores it separately. For now,
+    `filename` is the only stable identifier — `claude_session_id` is
+    a description, not a key.
     """
     import re
-    # Match the part after the date
     match = re.search(r'\d{4}-\d{2}-\d{2}-(.+)\.md$', filename)
     return match.group(1) if match else None
 
@@ -128,24 +145,26 @@ def import_metadata(
 
     with get_connection(db_path) as conn:
         for m in metadata:
-            session_id = extract_session_id(m['filename'])
+            claude_session_id = extract_claude_session_id(m['filename'])
             source_path = str(source_dir / m['filename']) if source_dir else None
 
-            # Proper UPSERT — preserves files.id across re-imports so that
-            # FK references in conversation_signals, labels, noise_predictions,
-            # etc. remain valid. The previous INSERT OR REPLACE pattern
-            # delete+inserted on conflict, allocating a new auto-increment id
-            # and silently orphaning every dependent row.
+            # Proper UPSERT — preserves the parent row's identity across
+            # re-imports. After Chunk 1, dependent tables FK on
+            # files.filename (a content-derived natural key), so even an
+            # INSERT OR REPLACE regression couldn't orphan rows; but the
+            # UPSERT remains the correct ingestion pattern because it
+            # avoids triggering FK constraint errors and preserves the
+            # parent row's full state across re-imports.
             conn.execute("""
                 INSERT INTO files (
-                    filename, session_id, date, is_agent, file_size,
+                    filename, claude_session_id, date, is_agent, file_size,
                     user_turns, claude_turns, substantive_user_turns,
                     user_word_count, claude_word_count, dialogue_density,
                     has_command_expansion, has_reflective_language,
                     source_path, status, imported_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
                 ON CONFLICT(filename) DO UPDATE SET
-                    session_id = excluded.session_id,
+                    claude_session_id = excluded.claude_session_id,
                     date = excluded.date,
                     is_agent = excluded.is_agent,
                     file_size = excluded.file_size,
@@ -160,7 +179,7 @@ def import_metadata(
                     source_path = excluded.source_path,
                     imported_at = CURRENT_TIMESTAMP
             """, (
-                m['filename'], session_id, m['date'], m['is_agent'], m['file_size'],
+                m['filename'], claude_session_id, m['date'], m['is_agent'], m['file_size'],
                 m['user_turns'], m['claude_turns'], m['substantive_user_turns'],
                 m['user_word_count'], m['claude_word_count'], m['dialogue_density'],
                 m['has_command_expansion'], m['has_reflective_language'],
@@ -186,7 +205,7 @@ def get_unlabeled_files(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
     with get_connection(db_path) as conn:
         rows = conn.execute("""
             SELECT f.* FROM files f
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE l.id IS NULL
             ORDER BY f.substantive_user_turns DESC
         """).fetchall()
@@ -217,7 +236,7 @@ def get_files_by_criteria(
 # --- Label operations ---
 
 def add_label(
-    file_id: int,
+    filename: str,
     rating: int,
     tags: Optional[List[str]] = None,
     notes: str = "",
@@ -228,7 +247,7 @@ def add_label(
     """Add a label for a file or segment. Idempotent — updates if exists.
 
     Args:
-        file_id: ID of the file being labeled
+        filename: Conversation filename (FK target after Chunk 1)
         rating: 1=thin, 2=functional, 3=rich
         tags: Optional list of secondary tags
         notes: Optional notes
@@ -242,8 +261,8 @@ def add_label(
         # Check if label exists for this file/segment
         existing = conn.execute("""
             SELECT id FROM labels
-            WHERE file_id = ? AND turn_start IS ? AND turn_end IS ?
-        """, (file_id, turn_start, turn_end)).fetchone()
+            WHERE filename = ? AND turn_start IS ? AND turn_end IS ?
+        """, (filename, turn_start, turn_end)).fetchone()
 
         if existing:
             # Update existing label
@@ -254,9 +273,9 @@ def add_label(
             return existing[0]
 
         cursor = conn.execute("""
-            INSERT INTO labels (file_id, turn_start, turn_end, rating, tags, notes)
+            INSERT INTO labels (filename, turn_start, turn_end, rating, tags, notes)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (file_id, turn_start, turn_end, rating, tags_json, notes))
+        """, (filename, turn_start, turn_end, rating, tags_json, notes))
         return cursor.lastrowid
 
 
@@ -264,9 +283,9 @@ def get_labels(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
     """Get all labels with file info."""
     with get_connection(db_path) as conn:
         rows = conn.execute("""
-            SELECT l.*, f.filename, f.user_word_count
+            SELECT l.*, f.user_word_count
             FROM labels l
-            JOIN files f ON l.file_id = f.id
+            JOIN files f ON l.filename = f.filename
             ORDER BY l.created_at DESC
         """).fetchall()
         return [dict(r) for r in rows]
@@ -277,7 +296,7 @@ def get_rich_files(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
     with get_connection(db_path) as conn:
         rows = conn.execute("""
             SELECT f.* FROM files f
-            JOIN labels l ON f.id = l.file_id
+            JOIN labels l ON f.filename = l.filename
             WHERE l.rating = 3
         """).fetchall()
         return [dict(r) for r in rows]
@@ -291,7 +310,7 @@ def get_files_by_rating(
     with get_connection(db_path) as conn:
         rows = conn.execute("""
             SELECT f.* FROM files f
-            JOIN labels l ON f.id = l.file_id
+            JOIN labels l ON f.filename = l.filename
             WHERE l.rating = ?
         """, (rating,)).fetchall()
         return [dict(r) for r in rows]
@@ -324,7 +343,7 @@ def get_markers(db_path: Path = DEFAULT_DB_PATH) -> List[Dict]:
 
 def add_example(
     marker_id: int,
-    file_id: int,
+    filename: str,
     excerpt: str,
     notes: str = "",
     turn_start: Optional[int] = None,
@@ -334,9 +353,9 @@ def add_example(
     """Add an example for a marker."""
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
-            INSERT INTO examples (marker_id, file_id, turn_start, turn_end, excerpt, notes)
+            INSERT INTO examples (marker_id, filename, turn_start, turn_end, excerpt, notes)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (marker_id, file_id, turn_start, turn_end, excerpt, notes))
+        """, (marker_id, filename, turn_start, turn_end, excerpt, notes))
         return cursor.lastrowid
 
 
@@ -344,9 +363,8 @@ def get_examples_for_marker(marker_id: int, db_path: Path = DEFAULT_DB_PATH) -> 
     """Get all examples for a marker."""
     with get_connection(db_path) as conn:
         rows = conn.execute("""
-            SELECT e.*, f.filename
+            SELECT e.*
             FROM examples e
-            JOIN files f ON e.file_id = f.id
             WHERE e.marker_id = ?
         """, (marker_id,)).fetchall()
         return [dict(r) for r in rows]
@@ -355,15 +373,15 @@ def get_examples_for_marker(marker_id: int, db_path: Path = DEFAULT_DB_PATH) -> 
 # --- File status operations ---
 
 def update_file_status(
-    file_id: int,
+    filename: str,
     status: str,
     db_path: Path = DEFAULT_DB_PATH
 ) -> None:
     """Update the status of a file (active, filtered, pending)."""
     with get_connection(db_path) as conn:
         conn.execute(
-            "UPDATE files SET status = ? WHERE id = ?",
-            (status, file_id)
+            "UPDATE files SET status = ? WHERE filename = ?",
+            (status, filename)
         )
 
 
@@ -395,7 +413,7 @@ def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
         # File counts
         stats['total_files'] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         stats['labeled_files'] = conn.execute(
-            "SELECT COUNT(DISTINCT file_id) FROM labels"
+            "SELECT COUNT(DISTINCT filename) FROM labels"
         ).fetchone()[0]
 
         # Rating breakdown (1=thin, 2=functional, 3=rich)
@@ -434,7 +452,7 @@ def get_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
 
 
 def add_annotation(
-    file_id: int,
+    filename: str,
     kind: str,
     value: Optional[str] = None,
     thread: Optional[str] = None,
@@ -454,17 +472,17 @@ def add_annotation(
         cursor = conn.execute(
             """
             INSERT INTO annotations (
-                file_id, exchange_start, exchange_end,
+                filename, exchange_start, exchange_end,
                 kind, value, thread, notes, source
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (file_id, exchange_start, exchange_end, kind, value, thread, notes, source),
+            (filename, exchange_start, exchange_end, kind, value, thread, notes, source),
         )
         return cursor.lastrowid
 
 
 def get_annotations(
-    file_id: Optional[int] = None,
+    filename: Optional[str] = None,
     kind: Optional[str] = None,
     thread: Optional[str] = None,
     source: Optional[str] = None,
@@ -472,16 +490,16 @@ def get_annotations(
 ) -> List[Dict]:
     """Get annotations, optionally filtered."""
     query = """
-        SELECT a.*, f.filename, f.session_id, f.date
+        SELECT a.*, f.claude_session_id, f.date
         FROM annotations a
-        JOIN files f ON a.file_id = f.id
+        JOIN files f ON a.filename = f.filename
         WHERE 1=1
     """
     params: list = []
 
-    if file_id is not None:
-        query += " AND a.file_id = ?"
-        params.append(file_id)
+    if filename is not None:
+        query += " AND a.filename = ?"
+        params.append(filename)
     if kind is not None:
         query += " AND a.kind = ?"
         params.append(kind)
@@ -535,9 +553,23 @@ def get_file_by_session(
     session_id: str,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> Optional[Dict]:
-    """Look up a file by session_id (used by MCP tools)."""
+    """Look up a file by filename (preferred) or claude_session_id (fallback).
+
+    The MCP server's external API still calls this `session_id` for
+    backwards compatibility with existing user workflows. Internally,
+    inputs ending in `.md` are treated as filenames (the stable, unique
+    identifier — preferred); other inputs fall back to claude_session_id
+    lookup, which is collision-prone (35 collision groups in current
+    corpus, returns first match arbitrarily). Stage B captures full
+    Claude UUIDs and removes the collision class entirely.
+    """
     with get_connection(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM files WHERE session_id = ?", (session_id,)
-        ).fetchone()
+        if session_id.endswith('.md'):
+            row = conn.execute(
+                "SELECT * FROM files WHERE filename = ?", (session_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM files WHERE claude_session_id = ?", (session_id,)
+            ).fetchone()
         return dict(row) if row else None

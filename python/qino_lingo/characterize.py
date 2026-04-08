@@ -39,8 +39,8 @@ STRATEGIES = {
         "description": "Reflective language + high engagement — most likely rich",
         "query": """
             SELECT f.* FROM files f
-            LEFT JOIN pending_labels pl ON f.id = pl.file_id AND pl.source = 'ai'
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN pending_labels pl ON f.filename = pl.filename AND pl.source = 'ai'
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE pl.id IS NULL
               AND l.id IS NULL
               AND f.is_agent = 0
@@ -53,8 +53,8 @@ STRATEGIES = {
         "description": "Medium engagement, ambiguous quality — hard to classify",
         "query": """
             SELECT f.* FROM files f
-            LEFT JOIN pending_labels pl ON f.id = pl.file_id AND pl.source = 'ai'
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN pending_labels pl ON f.filename = pl.filename AND pl.source = 'ai'
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE pl.id IS NULL
               AND l.id IS NULL
               AND f.is_agent = 0
@@ -68,8 +68,8 @@ STRATEGIES = {
         "description": "Clearly thin conversations — negative signal for calibration",
         "query": """
             SELECT f.* FROM files f
-            LEFT JOIN pending_labels pl ON f.id = pl.file_id AND pl.source = 'ai'
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN pending_labels pl ON f.filename = pl.filename AND pl.source = 'ai'
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE pl.id IS NULL
               AND l.id IS NULL
               AND f.is_agent = 0
@@ -82,8 +82,8 @@ STRATEGIES = {
         "description": "Broad random coverage across the corpus",
         "query": """
             SELECT f.* FROM files f
-            LEFT JOIN pending_labels pl ON f.id = pl.file_id AND pl.source = 'ai'
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN pending_labels pl ON f.filename = pl.filename AND pl.source = 'ai'
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE pl.id IS NULL
               AND l.id IS NULL
               AND f.is_agent = 0
@@ -270,7 +270,7 @@ def analyze_conversation(
 # --- Storage ---
 
 def store_result(
-    file_id: int,
+    filename: str,
     result: Dict,
     model: str,
     strategy: str,
@@ -293,10 +293,10 @@ def store_result(
     with get_connection(db_path) as conn:
         cursor = conn.execute(
             """
-            INSERT INTO pending_labels (file_id, turn_start, turn_end, source, context)
+            INSERT INTO pending_labels (filename, turn_start, turn_end, source, context)
             VALUES (?, ?, ?, 'ai', ?)
             """,
-            (file_id, turn_start, turn_end, context),
+            (filename, turn_start, turn_end, context),
         )
         return cursor.lastrowid
 
@@ -332,7 +332,6 @@ def run(
 
     for i, file_row in enumerate(candidates, 1):
         filename = file_row["filename"]
-        file_id = file_row["id"]
         filepath = corpus_dir / filename
 
         print(f"[{i}/{len(candidates)}] {filename}")
@@ -385,7 +384,7 @@ def run(
                 turn_end = window[-1].index if len(windows) > 1 else None
 
                 label_id = store_result(
-                    file_id=file_id,
+                    filename=filename,
                     result=result,
                     model=model,
                     strategy=strategy,

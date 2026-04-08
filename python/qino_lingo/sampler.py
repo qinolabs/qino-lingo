@@ -19,7 +19,7 @@ def sample_random(
         if exclude_labeled:
             query = """
                 SELECT f.* FROM files f
-                LEFT JOIN labels l ON f.id = l.file_id
+                LEFT JOIN labels l ON f.filename = l.filename
                 WHERE l.id IS NULL
                 ORDER BY RANDOM()
                 LIMIT ?
@@ -51,7 +51,7 @@ def sample_stratified(
     with get_connection(db_path) as conn:
         base_query = """
             SELECT f.* FROM files f
-            LEFT JOIN labels l ON f.id = l.file_id
+            LEFT JOIN labels l ON f.filename = l.filename
             WHERE l.id IS NULL AND {condition}
             ORDER BY RANDOM()
             LIMIT ?
@@ -109,7 +109,7 @@ def sample_top_candidates(
         if exclude_labeled:
             query = """
                 SELECT f.* FROM files f
-                LEFT JOIN labels l ON f.id = l.file_id
+                LEFT JOIN labels l ON f.filename = l.filename
                 WHERE l.id IS NULL
                 ORDER BY
                     (CASE WHEN has_reflective_language THEN 1 ELSE 0 END) DESC,
@@ -135,7 +135,7 @@ def get_labeling_progress(db_path: Path = DEFAULT_DB_PATH) -> Dict:
     """Get labeling progress statistics."""
     with get_connection(db_path) as conn:
         total = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        labeled = conn.execute("SELECT COUNT(DISTINCT file_id) FROM labels").fetchone()[0]
+        labeled = conn.execute("SELECT COUNT(DISTINCT filename) FROM labels").fetchone()[0]
 
         # Rating breakdown (1=thin, 2=functional, 3=rich)
         rating_rows = conn.execute(

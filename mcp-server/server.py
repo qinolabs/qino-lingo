@@ -29,7 +29,6 @@ from qino_lingo.parser import parse_conversation
 from qino_lingo.cleaning import clean_conversation, CleanedExchange
 from qino_lingo.signals import (
     ALGORITHM_VERSION,
-    init_signal_tables,
     check_staleness,
     score_conceptual,
     detect_correction,
@@ -51,8 +50,8 @@ mcp = FastMCP(
     ),
 )
 
-# Ensure signal tables exist on startup
-init_signal_tables(DB_PATH)
+# Schema is owned by python/qino_lingo/migrations/. The MCP server
+# trusts it has been applied via `make migrate`. No defensive DDL here.
 
 # Check staleness on startup
 _staleness = check_staleness(DB_PATH)
@@ -118,8 +117,8 @@ def search(
 
     if min_concept_density is not None:
         query += """
-            AND f.id IN (
-                SELECT file_id FROM conversation_signals
+            AND f.filename IN (
+                SELECT filename FROM conversation_signals
                 WHERE concept_density >= ?
             )
         """
@@ -169,12 +168,12 @@ def search(
             # Get signals if available
             signal_row = conn.execute(
                 "SELECT metalogue_score, concept_density, trajectory_shape "
-                "FROM conversation_signals WHERE file_id = ?",
-                (file_info["id"],),
+                "FROM conversation_signals WHERE filename = ?",
+                (file_info["filename"],),
             ).fetchone()
 
             result = {
-                "session_id": file_info["session_id"],
+                "session_id": file_info["claude_session_id"],
                 "filename": file_info["filename"],
                 "date": file_info["date"],
                 "snippet": snippet,
@@ -217,15 +216,10 @@ def get(
         Conversation data. For non-raw views, returns exchange-level data
         with user and assistant content paired.
     """
-    with get_connection(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT * FROM files WHERE session_id = ?", (session_id,)
-        ).fetchone()
-
-    if not row:
+    file_info = get_file_by_session(session_id, DB_PATH)
+    if not file_info:
         return {"error": f"Session not found: {session_id}"}
 
-    file_info = dict(row)
     filepath = CORPUS_DIR / file_info["filename"]
 
     if not filepath.exists():
@@ -245,7 +239,7 @@ def get(
                 for t in conversation.turns
             ]
             return {
-                "session_id": file_info["session_id"],
+                "session_id": file_info["claude_session_id"],
                 "filename": file_info["filename"],
                 "date": file_info["date"],
                 "view": "raw",
@@ -297,7 +291,7 @@ def get(
         # All exchanges, numbered, no signal annotation
         filtered = [e for e in exchanges if not e.is_system]
         return {
-            "session_id": file_info["session_id"],
+            "session_id": file_info["claude_session_id"],
             "filename": file_info["filename"],
             "date": file_info["date"],
             "view": "exchanges",
@@ -309,7 +303,7 @@ def get(
         # All non-system, non-terse exchanges
         filtered = [e for e in exchanges if not e.is_system and not e.is_terse]
         return {
-            "session_id": file_info["session_id"],
+            "session_id": file_info["claude_session_id"],
             "filename": file_info["filename"],
             "date": file_info["date"],
             "view": "clean",
@@ -332,23 +326,24 @@ def get(
 
         # Get trajectory from DB
         trajectory = "unknown"
+        density = None
         with get_connection(DB_PATH) as conn:
             sig_row = conn.execute(
-                "SELECT trajectory_shape, concept_density FROM conversation_signals WHERE file_id = ?",
-                (file_info["id"],),
+                "SELECT trajectory_shape, concept_density FROM conversation_signals WHERE filename = ?",
+                (file_info["filename"],),
             ).fetchone()
             if sig_row:
                 trajectory = sig_row[0]
                 density = sig_row[1]
 
         return {
-            "session_id": file_info["session_id"],
+            "session_id": file_info["claude_session_id"],
             "filename": file_info["filename"],
             "date": file_info["date"],
             "view": "thinking",
             "total_thinking_exchanges": len(filtered),
             "trajectory_shape": trajectory,
-            "concept_density": density if sig_row else None,
+            "concept_density": density,
             "exchanges": [exchange_to_dict(e, include_signals=True) for e in filtered],
         }
 
@@ -366,37 +361,32 @@ def metadata(session_id: str) -> dict:
     Returns:
         Full metadata including conversation signals and annotations
     """
+    file_info = get_file_by_session(session_id, DB_PATH)
+    if not file_info:
+        return {"error": f"Session not found: {session_id}"}
+
     with get_connection(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT * FROM files WHERE session_id = ?", (session_id,)
-        ).fetchone()
-
-        if not row:
-            return {"error": f"Session not found: {session_id}"}
-
-        file_info = dict(row)
-
         # Labels
         labels = conn.execute(
-            "SELECT rating, turn_start, turn_end, tags, notes FROM labels WHERE file_id = ?",
-            (file_info["id"],),
+            "SELECT rating, turn_start, turn_end, tags, notes FROM labels WHERE filename = ?",
+            (file_info["filename"],),
         ).fetchall()
 
         # Signals
         sig_row = conn.execute(
-            "SELECT * FROM conversation_signals WHERE file_id = ?",
-            (file_info["id"],),
+            "SELECT * FROM conversation_signals WHERE filename = ?",
+            (file_info["filename"],),
         ).fetchone()
 
         # Annotations
         ann_rows = conn.execute(
             "SELECT kind, value, thread, notes, exchange_start, exchange_end, source, created_at "
-            "FROM annotations WHERE file_id = ?",
-            (file_info["id"],),
+            "FROM annotations WHERE filename = ?",
+            (file_info["filename"],),
         ).fetchall()
 
     result = {
-        "session_id": file_info["session_id"],
+        "session_id": file_info["claude_session_id"],
         "filename": file_info["filename"],
         "date": file_info["date"],
         "status": file_info["status"],
@@ -451,7 +441,7 @@ def stats() -> dict:
 
         result["total_files"] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         result["labeled_files"] = conn.execute(
-            "SELECT COUNT(DISTINCT file_id) FROM labels"
+            "SELECT COUNT(DISTINCT filename) FROM labels"
         ).fetchone()[0]
 
         status_rows = conn.execute(
@@ -542,9 +532,9 @@ def candidates(
         Ranked list with score, metrics, and best_preview per conversation
     """
     query = """
-        SELECT cs.*, f.filename, f.session_id, f.date, f.user_word_count
+        SELECT cs.*, f.claude_session_id, f.date, f.user_word_count
         FROM conversation_signals cs
-        JOIN files f ON cs.file_id = f.id
+        JOIN files f ON cs.filename = f.filename
         WHERE cs.metalogue_score >= ?
         AND cs.concept_density >= ?
     """
@@ -561,8 +551,8 @@ def candidates(
         params.append(trajectory)
     if unannotated_only:
         query += """
-            AND f.id NOT IN (
-                SELECT file_id FROM annotations WHERE kind = 'metalogue_verdict'
+            AND f.filename NOT IN (
+                SELECT filename FROM annotations WHERE kind = 'metalogue_verdict'
             )
         """
 
@@ -574,7 +564,7 @@ def candidates(
 
     return [
         {
-            "session_id": r["session_id"],
+            "session_id": r["claude_session_id"],
             "filename": r["filename"],
             "date": r["date"],
             "metalogue_score": r["metalogue_score"],
@@ -676,15 +666,15 @@ def read_thinking(
     with get_connection(DB_PATH) as conn:
         sig_row = conn.execute(
             "SELECT trajectory_shape, concept_density, metalogue_score "
-            "FROM conversation_signals WHERE file_id = ?",
-            (file_info["id"],),
+            "FROM conversation_signals WHERE filename = ?",
+            (file_info["filename"],),
         ).fetchone()
         if sig_row:
             trajectory = sig_row[0]
             density = sig_row[1]
 
     return {
-        "session_id": session_id,
+        "session_id": file_info["claude_session_id"],
         "filename": file_info["filename"],
         "date": file_info["date"],
         "total_thinking_exchanges": len(thinking),
@@ -732,7 +722,7 @@ def annotate(
         return {"error": f"Session not found: {session_id}"}
 
     ann_id = add_annotation(
-        file_id=file_info["id"],
+        filename=file_info["filename"],
         kind=kind,
         value=value,
         thread=thread,
@@ -745,7 +735,8 @@ def annotate(
 
     return {
         "id": ann_id,
-        "session_id": session_id,
+        "session_id": file_info["claude_session_id"],
+        "filename": file_info["filename"],
         "kind": kind,
         "value": value,
         "thread": thread,

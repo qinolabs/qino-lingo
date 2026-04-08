@@ -108,14 +108,17 @@ def run_ml_inference(
     print(f"\nLoading embedding model ({embedding_model_name})...")
     embed_model = get_embedding_model(embedding_model_name)
 
-    # Connect to database
+    # Connect to database. Schema authority lives in
+    # python/qino_lingo/migrations/ — both noise_predictions and
+    # pending_labels FK on filename after Chunk 1.
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
 
     # Get all files
     cursor.execute("""
-        SELECT id, filename, source_path
+        SELECT filename, source_path
         FROM files
         WHERE status = 'active'
     """)
@@ -133,7 +136,6 @@ def run_ml_inference(
     }
 
     for file_row in files:
-        file_id = file_row["id"]
         filename = file_row["filename"]
         source_path = file_row["source_path"]
 
@@ -194,14 +196,14 @@ def run_ml_inference(
                 # Insert or update prediction
                 cursor.execute("""
                     INSERT INTO noise_predictions
-                        (file_id, turn_idx, ml_score, ml_is_noise, created_at)
+                        (filename, turn_idx, ml_score, ml_is_noise, created_at)
                     VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(file_id, turn_idx) DO UPDATE SET
+                    ON CONFLICT(filename, turn_idx) DO UPDATE SET
                         ml_score = excluded.ml_score,
                         ml_is_noise = excluded.ml_is_noise,
                         updated_at = ?
                 """, (
-                    file_id, turn_idx, score,
+                    filename, turn_idx, score,
                     1 if is_noise else (0 if is_noise is False else None),
                     datetime.now().isoformat(),
                     datetime.now().isoformat()
@@ -211,18 +213,18 @@ def run_ml_inference(
         if queue_uncertain and uncertain_turns and not dry_run:
             # Check if already in queue
             cursor.execute("""
-                SELECT file_id FROM pending_labels WHERE file_id = ?
-            """, (file_id,))
+                SELECT filename FROM pending_labels WHERE filename = ?
+            """, (filename,))
             if not cursor.fetchone():
                 # Add to queue with context about uncertain turns
                 start_turn = min(uncertain_turns)
                 end_turn = max(uncertain_turns)
                 cursor.execute("""
                     INSERT INTO pending_labels
-                        (file_id, turn_start, turn_end, source, context, created_at)
+                        (filename, turn_start, turn_end, source, context, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (
-                    file_id, start_turn, end_turn,
+                    filename, start_turn, end_turn,
                     "ml_uncertain",
                     f"ML uncertain on {len(uncertain_turns)} turns (scores {low_threshold}-{high_threshold})",
                     datetime.now().isoformat()

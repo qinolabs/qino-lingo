@@ -88,10 +88,10 @@ def export_labeled_turns(
 
     # Get all labels with file info
     query = """
-        SELECT l.id, l.file_id, l.turn_start, l.turn_end, l.rating, l.tags, l.notes,
+        SELECT l.id, l.turn_start, l.turn_end, l.rating, l.tags, l.notes,
                f.filename, f.source_path
         FROM labels l
-        JOIN files f ON l.file_id = f.id
+        JOIN files f ON l.filename = f.filename
     """
     if rating_filter is not None:
         query += f" WHERE l.rating = {rating_filter}"
@@ -129,7 +129,6 @@ def export_labeled_turns(
                 continue
 
             labeled_turns.append(LabeledTurn(
-                file_id=label["file_id"],
                 filename=label["filename"],
                 turn_index=idx,
                 role=turn["role"],
