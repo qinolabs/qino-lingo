@@ -403,14 +403,36 @@ schema decision.
       Stage A's column is dropped)
 
 **Status as single source of truth**
-- [ ] Migration 08: extend `files.status` enum to include
-      `active | noise | empty | missing`. Backfill from `_noise/` directory.
-- [ ] Move `_noise/` files back into `data/corpus/`, set status='noise'
-- [ ] Update `filter_noise.py` to set status instead of moving files
-- [ ] Update `signals.py::compute_all` to query db by status instead of
-      globbing `data/corpus/`
-- [ ] Update `mcp-server/server.py` to filter by status
-- [ ] Remove `_noise/` directory entirely
+- [x] Migration `03-extend-status-enum.sql`: extend `files.status` enum
+      via CHECK constraint to allow `active | noise | empty | missing`.
+      Files table rebuilt-and-renamed; FK references from dependent
+      tables survived because the column kept its name and uniqueness.
+      `idx_files_status` added.
+- [x] One-shot data migration `python/qino_lingo/collapse_noise.py`:
+      backfilled 340 files (db rows whose filename was in `_noise/`)
+      with `status='noise'`, ingested 289 orphans (legacy files in
+      `_noise/` that had no db row at all — they predated db ingestion
+      and could not be picked up by `make ingest` because that walks
+      `~/.claude/projects/`, not the local corpus). Used
+      `extract_metadata.extract_metadata` directly to compute their
+      metadata.
+- [x] Moved all 629 files from `_noise/` back into `data/corpus/`.
+- [x] Removed `_noise/` directory entirely.
+- [x] Update `filter_noise.py` to set status='noise' in db instead of
+      moving files. Walks the active subset of the db (so noise files
+      already classified are skipped). Run-once pattern is gone — it
+      can be invoked safely against the active set repeatedly.
+- [x] Update `signals.py::compute_all` to query db by `status='active'`
+      instead of globbing `data/corpus/`. The new path resolves
+      filenames to filepaths via the corpus dir, computes signals only
+      for active files, and reports any files marked active but
+      missing from disk (Chunk 4 will reconcile these as `missing`).
+- [x] Defensive: add `status='active'` filter to MCP server
+      `candidates()` query (it was relying on signal-coverage as an
+      implicit filter — fine in practice because no signal rows exist
+      for noise files, but explicit is safer).
+- [x] Remove `_noise/` filesystem fallback in
+      `apps/lingo-label/src/server/get-conversation.ts::findConversationFile`.
 
 **Backup overhaul**
 - [ ] Replace `backup-corpus.sh` with `python/qino_lingo/backup.py` using
@@ -571,6 +593,91 @@ chosen path.)
 
 (To be filled in after the iteration completes. Capture surprises,
 incidents, and things that should change the next iteration's approach.)
+
+### Chunk 2 — Collapse `_noise/` into files.status (landed 2026-04-08)
+
+- **The drift was bigger than the iteration plan estimated.** Plan
+  said "~340 files in `_noise/`-but-active-in-db". Reality: 629 files
+  in `_noise/` total — 340 with db rows (the expected case) plus 289
+  *orphans* with no db row at all. The orphans were legacy state from
+  when `filter_noise.py` ran *before* db ingestion existed: it moved
+  files into `_noise/` before they ever got into the db, so they sat
+  there invisibly for months.
+- **Orphan recovery required a one-shot data migration, not pure SQL.**
+  `make ingest` walks `~/.claude/projects/`, not the local corpus, so
+  the orphans could not be re-ingested by re-running ingestion. The
+  fix was to call `extract_metadata.extract_metadata()` directly on
+  each orphan file, build the same metadata dict the normal pipeline
+  produces, and INSERT with `status='noise'`. This is exactly the
+  kind of data migration that doesn't fit the SQL-only migration
+  runner — `python/qino_lingo/collapse_noise.py` is a one-shot script
+  that does the work in a single transaction (340 backfills + 289
+  inserts, then filesystem moves, then directory removal).
+- **Schema change was small and clean.** Migration 03 only adds a
+  CHECK constraint on `files.status`. Implemented via the same
+  rebuild-and-rename pattern Chunk 1 used. The dependent tables FK to
+  `files(filename)` and survived the rebuild because the column kept
+  its name and uniqueness — verified with `PRAGMA foreign_key_check`
+  empty after the rebuild.
+- **Surprising win on signal coverage.** Before Chunk 2 the digest
+  reported 736 active files without signals. After Chunk 2 it's 396 —
+  a 340-file drop, exactly matching the number of in-db noise files
+  that got reclassified. The remaining 396 are the *true* signal
+  coverage gap (Chunk 4 territory). Pre-Chunk-2, the gap was a mix of
+  "noise files we never expected to compute signals for" and "real
+  coverage holes in the active set" — and there was no way to tell
+  them apart. Now there is.
+- **No stale signal data to clean up.** Counter-intuitive: zero
+  `conversation_signals` rows existed for files that became noise in
+  Chunk 2. Why? Because the OLD `signals.py::compute_all` globbed
+  `data/corpus/*.md` (top level only) — `_noise/` was never in its
+  scope. So even though the noise files had `status='active'` in db,
+  they had been silently skipped by signal computation all along. The
+  bug was that the system "worked" by accident: two layers of state
+  (filesystem location and db status) drifted apart, but the
+  filesystem-globbing reads happened to use the correct layer.
+- **The 289 orphans turned out to be tiny files.** Spot-checked one:
+  683 bytes, 2 user turns, 0 substantive content. These were noise
+  classifications from before db ingestion existed — they're real
+  conversations, just very short ones. Recovering them adds nothing
+  to the signal corpus, but it does mean every file in `data/corpus/`
+  now has a db row, which is the invariant Chunk 4's `make doctor`
+  will verify.
+- **`filter_noise.py` rewritten as a db updater, not a file mover.**
+  New shape: walks the *active* subset of the db (by query, not by
+  filesystem glob), checks each file against the same regex rules,
+  sets `status='noise'` for matches. Idempotent — safe to run
+  repeatedly. Reports a breakdown of reasons but doesn't move files
+  anywhere. The `--dry-run` flag was added for safety; the post-Chunk
+  2 dry-run shows 0 reclassifications because every active file is
+  already correctly classified.
+- **The TypeScript `findConversationFile` fallback is gone.** Chunk 1
+  had a comment marking it as removable once Chunk 2 lands. Removed
+  in this commit. After Chunk 2, every conversation lives at the top
+  level of `data/corpus/` regardless of noise/active status — there's
+  no other location to fall through to.
+- **Defensive add: `status='active'` in candidates()**. Pre-Chunk-2,
+  the MCP server's `candidates()` query relied implicitly on
+  signal-coverage (no signals existed for noise files, so they
+  couldn't appear in candidate results). With Chunk 2, the noise
+  files DO have valid db rows but still no signals. The implicit
+  guarantee still holds — but it's fragile. Added explicit
+  `WHERE f.status = 'active'` so a future signal recompute that
+  accidentally included noise files wouldn't surface them in
+  candidates.
+- **Verification:**
+  - 2062 db rows = 2062 files at top level of `data/corpus/`
+    (1433 active + 629 noise)
+  - `_noise/` directory deleted
+  - `PRAGMA foreign_key_check` empty
+  - `make digest` shows the new active/coverage numbers correctly
+  - `make signals --since 2026-04-01` exercises the new
+    `compute_all` query path (44 active conversations, 41 computed)
+  - `pnpm typecheck` clean
+  - MCP server smoke tests pass: `search()` and `candidates()`
+    return only active files; `metadata()` on a known noise file
+    returns `status=noise` correctly (users can still retrieve noise
+    files by id, they're just excluded from discovery queries)
 
 ### Chunk 1 — Stage A migrations + consumer updates (landed 2026-04-08)
 

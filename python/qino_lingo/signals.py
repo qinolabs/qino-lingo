@@ -454,29 +454,41 @@ def compute_all(
     db_path: Path = DEFAULT_DB_PATH,
     since: Optional[str] = None,
 ):
-    """Compute signals for all conversations and store in DB.
+    """Compute signals for all active conversations and store in DB.
+
+    After Chunk 2, the noise/active distinction lives in files.status,
+    not in filesystem location. This function queries the db for
+    status='active' rows instead of globbing the corpus directory —
+    that way noise files (which now physically live alongside active
+    files at the top level of data/corpus/) are correctly skipped.
 
     Args:
         corpus_dir: Directory containing conversation markdown files
+                    (used to resolve filenames to filepaths)
         db_path: Database path
         since: Only compute for files dated on or after this date (YYYY-MM-DD)
     """
-    init_signal_tables(db_path)
-
-    files = sorted(corpus_dir.glob("claude-conversation-*.md"))
+    query = "SELECT filename FROM files WHERE status = 'active'"
+    params: tuple = ()
     if since:
-        files = [
-            f
-            for f in files
-            if (m := re.search(r"(\d{4}-\d{2}-\d{2})", f.name))
-            and m.group(1) >= since
-        ]
+        query += " AND date >= ?"
+        params = (since,)
+    query += " ORDER BY filename"
 
-    print(f"Computing signals for {len(files)} conversations...")
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        active_filenames = [r[0] for r in rows]
+
+    print(f"Computing signals for {len(active_filenames)} active conversations...")
     computed = 0
     skipped = 0
+    missing = 0
 
-    for filepath in files:
+    for filename in active_filenames:
+        filepath = corpus_dir / filename
+        if not filepath.exists():
+            missing += 1
+            continue
         signals = analyze_conversation(filepath)
         if signals:
             if store_signals(signals, db_path):
@@ -486,7 +498,10 @@ def compute_all(
         else:
             skipped += 1
 
-    print(f"Done: {computed} computed, {skipped} skipped")
+    msg = f"Done: {computed} computed, {skipped} skipped"
+    if missing:
+        msg += f", {missing} missing on disk"
+    print(msg)
     return computed
 
 

@@ -80,23 +80,18 @@ function parseConversation(content: string): ConversationTurn[] {
 /**
  * Find the conversation file in the corpus.
  *
- * Note: after Chunk 2 (collapse `_noise/`) all conversations live at the
- * top level of the corpus dir. The legacy `_noise/` fallback below
- * exists for the in-between window where some files still live there;
- * once Chunk 2 lands and `_noise/` is gone, the fallback can be removed.
+ * After Chunk 2, every conversation lives at the top level of
+ * data/corpus/ regardless of noise/active status. The status column on
+ * files is the single source of truth; filesystem location is no
+ * longer a noise marker. The previous `_noise/` fallback was removed
+ * when Chunk 2 collapsed the directory.
  */
 function findConversationFile(corpusDir: string, filename: string): string {
   const filePath = join(corpusDir, filename);
-  if (existsSync(filePath)) {
-    return filePath;
+  if (!existsSync(filePath)) {
+    throw new Error(`Conversation file not found: ${filePath}`);
   }
-
-  const noisePath = join(corpusDir, "_noise", filename);
-  if (existsSync(noisePath)) {
-    return noisePath;
-  }
-
-  throw new Error(`Conversation file not found: ${filePath}`);
+  return filePath;
 }
 
 const ConversationIdSchema = z.object({

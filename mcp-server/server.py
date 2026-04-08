@@ -535,7 +535,8 @@ def candidates(
         SELECT cs.*, f.claude_session_id, f.date, f.user_word_count
         FROM conversation_signals cs
         JOIN files f ON cs.filename = f.filename
-        WHERE cs.metalogue_score >= ?
+        WHERE f.status = 'active'
+        AND cs.metalogue_score >= ?
         AND cs.concept_density >= ?
     """
     params: list = [min_score, min_density]
