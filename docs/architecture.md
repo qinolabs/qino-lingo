@@ -2,21 +2,37 @@
 
 Technical architecture for the epistemological signature extraction pipeline.
 
-## Overview
+qino-lingo's `corpus.db` serves two consumers: the historical labeling
+workflow (`lingo-label`, `calibrate.py`, `characterize.py`) and the MCP
+server that surfaces conversations for metalogue sourcing, deck composition,
+and other downstream work. See `docs/schema.md` for the consumer matrix and
+the full per-table reference.
+
+## Overview — the `make ingest` pipeline
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Data Flow                                        │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                               │
-│  Claude Code      Extraction       Filtering       Metadata       Database   │
-│  Storage       ─────────────►   ──────────────►  ──────────────►  ─────────► │
-│  (~/.claude/)    (ingest_*)      (noise removal)  (extraction)    (SQLite)   │
-│                                                                               │
-│  JSONL files     corpus/         corpus/_noise/   metadata.json   corpus.db  │
-│  ~2000 sessions  ~1000 files                      JSON array      4 tables   │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              Data Flow                                    │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  Phase 1 Pull    Phase 1.5 Backup    Phase 2 Index      Phase 3 Enrich   │
+│  ─────────────►  ────────────────►   ───────────────►   ───────────────► │
+│  claude-extract  sqlite3 .backup     filter_noise       signals.compute   │
+│  filter + dedup  sha256 manifest     extract_metadata   (MCP discovery    │
+│  copy into       rotate backups      import_metadata    surface)          │
+│  data/corpus/                                                             │
+│                                                                           │
+│  Sources         backups/            corpus.db          conversation_     │
+│  ~/.claude/      *.db + .manifest    files (UPSERT)     signals table     │
+│  .projects/                          filter_noise       + status writes   │
+│                                      sets status='noise'                  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+Every phase after the first is idempotent: re-running `make ingest` against
+an unchanged `~/.claude/projects/` is a no-op aside from the backup itself
+(which always snapshots the current state). See
+`docs/ingestion-routine.md` for the full routine spec.
 
 ## Components
 
@@ -67,7 +83,11 @@ Key properties:
 
 ### 2. Noise Filtering (filter_noise.py)
 
-Moves obviously non-rich files to `data/corpus/_noise/`:
+Sets `files.status = 'noise'` on rows matching any of the regex-based
+criteria below. Does **not** move files anywhere on disk —
+`data/corpus/` is flat; `status` is the single source of truth for
+"where does this file belong in the pipeline." See `docs/schema.md`
+for the full status enum semantics.
 
 | Criterion | Description |
 |-----------|-------------|
@@ -76,6 +96,9 @@ Moves obviously non-rich files to `data/corpus/_noise/`:
 | Agent warmup | Agent sessions with no substantive exchange |
 | No substantive input | Commands only, no real user text |
 | Pure transactional | Only commit/update operations, no conceptual exchange |
+
+Idempotent: walks the current `status='active'` subset on every run and
+reclassifies matches. Safe to re-run. `--dry-run` available for preview.
 
 ### 3. Metadata Extraction (extract_metadata.py)
 
@@ -107,9 +130,25 @@ Extracts quantitative signals from each file:
 - "i wonder"
 - "this feels like"
 
-### 4. Database (python/qino_lingo/db.py)
+### 4. Database (python/qino_lingo/db.py + migrations/)
 
-SQLite database with four tables. See `docs/schema.md` for details.
+SQLite database with 12 tables serving two consumer groups (shared / mcp /
+training). The schema is owned by `python/qino_lingo/migrations/*.sql` —
+all changes go through the numbered migration runner (`make migrate`),
+never via inline `CREATE TABLE IF NOT EXISTS` in application code.
+
+Key identity and status conventions:
+
+- **FK target is `files.filename`**, not `files.id`. The legacy autoincrement
+  PK still exists but no longer participates in cross-table FKs.
+- **`PRAGMA foreign_keys = ON`** is required on every connection; both
+  `db.py::get_connection` and the lingo-label Drizzle connection enable it.
+- **`files.status`** is a CHECK-constrained enum (`active | noise | empty
+  | missing`) and is the single source of truth for pipeline state.
+
+See `docs/schema.md` for the full per-table reference, consumer matrix,
+identity strategy, and the empty ↔ active promotion rule that makes signal
+coverage recoverable across algorithm bumps.
 
 ### 5. Parser (python/qino_lingo/parser.py)
 
@@ -169,38 +208,45 @@ Functions:
 
 ## Continuous Ingestion
 
-New conversations are ingested automatically from Claude Code's local storage:
+New conversations are pulled from Claude Code's local storage via the
+`make ingest` routine. Prefer `make ingest` over calling the script
+directly so that Phase 1.5 (backup) always runs before any db mutation.
 
 ```bash
-# Full sync — extracts all new conversations
-python3 ingest_conversations.py
-
-# Quick update — only last N sessions
-python3 ingest_conversations.py --recent 20
-
-# Preview changes
-python3 ingest_conversations.py --dry-run
+make ingest           # Full pipeline + backup + digest
+make ingest-recent    # Only last 20 sessions (fast iteration)
+make verify           # Dry-run preview, no writes
 ```
 
 The `ingest_conversations.py` script:
+
 1. Uses [claude-conversation-extractor](https://github.com/ZeroSumQuant/claude-conversation-extractor) to export from `~/.claude/projects/`
 2. Filters to configured project folders (see `INCLUDE_FOLDERS` in script)
-3. Deduplicates by session ID against existing corpus
-4. Runs the pipeline: `filter_noise.py` → `extract_metadata.py` → DB import
+3. Deduplicates by filename against the existing corpus
+4. **Phase 1.5** — takes a transactional backup of `corpus.db` plus a sha256 manifest of `data/corpus/` via `python/qino_lingo/backup.py` (with `--tag pre-ingest`), and refuses to proceed if the backup fails
+5. Runs Phase 2: `filter_noise.py` → `extract_metadata.py` → `import_metadata`
+6. Runs Phase 3: `signals.compute_all(since=<oldest_new_file_date>)` so newly-ingested files are immediately visible to the MCP discovery tools
+7. Prints a digest of corpus state + top fresh high-signal arrivals
 
 Schema supports incremental import via:
-- `session_id` — stable identity from filename
-- `source_path` — original file location
-- `status` — active | filtered | pending
+
+- `filename` — stable natural key (FK target for all dependent tables)
+- `claude_session_id` — advisory identifier (collision-prone; see `docs/schema.md`)
+- `source_path` — original file location at time of ingest
+- `status` — `active | noise | empty | missing` (see `docs/schema.md`)
 - `imported_at` — timestamp
 
 ## Labeling UI
 
-The labeling interface is now implemented at `apps/label/`:
+The labeling interface is at `apps/lingo-label/`:
+
 - TanStack Start with server functions
 - Keyboard-driven interface for rapid labeling
 - Turn-level selection and marking
-- Noise prediction overlay from labeler model
+- Noise prediction overlay from the noise-filter model
+- `corpus.db` shared directly with the Python side via Drizzle ORM;
+  the schema lives in `src/server/schema.ts` as a hand-maintained
+  mirror of the canonical `python/qino_lingo/migrations/*.sql` files
 
 ## Future Components
 

@@ -17,6 +17,18 @@ A keyboard-first UI for marking conversation turns:
 - **Server Functions** — Direct DB access via Drizzle ORM
 - **No Authentication** — Local-only tool
 
+## Schema Authority
+
+`corpus.db`'s schema is owned by `python/qino_lingo/migrations/` (applied
+via `make migrate`). `src/server/schema.ts` is a hand-maintained mirror —
+when the Python-side migrations change the schema, update `schema.ts` to
+match and let the TypeScript compiler surface any consumer drift. Dependent
+tables FK on `files.filename`, not `files.id`; `PRAGMA foreign_keys = ON`
+must be enabled on every connection (already set in `src/server/db.ts`).
+See `../../docs/schema.md` and
+`../../implementations/persistence-layer/content/01-holistic-refactor.md`
+for the full rationale.
+
 ## Development
 
 ```bash

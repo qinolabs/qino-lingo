@@ -466,10 +466,26 @@ schema decision.
       can actually see (not just stderr)
 
 **Documentation**
-- [ ] `docs/schema.md` rewrite — consumer matrix, identity strategy, status
-      semantics, migration workflow
-- [ ] Update `docs/architecture.md` to reflect dual-consumer reality
-- [ ] Update `apps/lingo-label/CLAUDE.md` to reference db.py as canonical
+- [x] `docs/schema.md` rewrite — full replacement (~400 lines) with
+      consumer matrix (shared/mcp/training) reusing backup.py's
+      REPORTED_TABLES grouping, identity strategy, status enum
+      semantics, empty↔active promotion rule, per-table reference for
+      all 12 tables, migration/backup/doctor workflow links. Every
+      section points to its canonical authority in code to contain
+      future drift.
+- [x] Update `docs/architecture.md` — targeted fix. New Phase 1.5
+      backup in the data-flow diagram, noise section rewritten (status
+      enum not filesystem moves), section 4 updated to "12 tables
+      across two consumer groups" with link to schema.md, Continuous
+      Ingestion section rewritten to match the post-Chunk-3 pipeline
+      (make ingest, Phase 1.5 backup, Phase 3 signals), apps/label ->
+      apps/lingo-label. Sections 5 (Parser) and 6 (Sampler) left
+      untouched — still accurate.
+- [x] Update `apps/lingo-label/CLAUDE.md` — added 10-line "Schema
+      Authority" section between existing "Architecture" and
+      "Development" sections, pointing to migrations/ as canonical and
+      schema.ts as a hand-maintained mirror. Noted the filename-FK
+      rule and the required FK pragma.
 
 ## Sequencing
 
