@@ -21,12 +21,18 @@ make ingest
   ├─ Phase 1 — Pull
   │   claude-extract → temp dir
   │   filter to qinolabs* projects
-  │   dedupe against data/corpus/ + data/corpus/_noise/
+  │   dedupe against data/corpus/ (flat after Chunk 2)
   │   copy new files into data/corpus/
   │   update .ingest_state.json
   │
+  ├─ Phase 1.5 — Backup
+  │   sqlite3 .backup() → backups/corpus-TIMESTAMP-pre-ingest.db
+  │   write sha256 manifest of data/corpus/
+  │   rotate (last 10 + one per ISO week for 8 weeks)
+  │   refuses to continue if backup fails
+  │
   ├─ Phase 2 — Index
-  │   filter_noise.py     → moves noise files to _noise/
+  │   filter_noise.py     → sets status='noise' on matching db rows
   │   extract_metadata.py → writes metadata.json
   │   import_metadata()   → upserts into files table
   │
@@ -39,6 +45,13 @@ make ingest
       corpus state + 5 highest-signal arrivals from the last 7 days
 ```
 
+Phase 1.5 is the only phase that produces something *outside* `data/corpus/`
+and `corpus.db` itself: a sidecar `backups/` directory whose contents are
+gitignored. The backup uses SQLite's online `.backup()` API rather than `cp`,
+so it is safe under concurrent reads/writes and cannot capture a half-written
+page. To skip the backup phase (e.g. while reproducing an issue), pass
+`--skip-backup`. Don't make a habit of it.
+
 The signals step is the part that earns this routine its existence. Without
 it, newly-ingested conversations are invisible to the MCP server's discovery
 tools (`candidates`, `read_thinking`, `search(min_concept_density=...)`). Any
@@ -48,12 +61,14 @@ entry point that doesn't run signals is incomplete.
 
 | Target | What | When |
 |---|---|---|
-| `make ingest` | Full pipeline + digest | Default. Pre-session. |
+| `make ingest` | Full pipeline + backup + digest | Default. Pre-session. |
 | `make ingest-recent` | Last 20 sessions only + full pipeline + digest | Fast iteration during a session, when you know you're only after recent material |
 | `make verify` | Dry-run preview, no writes | When you want to see what would be ingested without committing |
 | `make digest` | Print corpus digest only | Mid-session check on what's in the db right now |
 | `make signals` | Recompute signals for the entire corpus | After upgrading the algorithm version (`signals.py::ALGORITHM_VERSION`) |
 | `make stats` | Raw `corpus.db` stats | Quick numerical sanity check |
+| `make backup` | Ad-hoc transactional snapshot of `corpus.db` + sha256 manifest of `data/corpus/`, with rotation | Before any manual db surgery (migrations, one-shot data scripts) |
+| `make backup-dry` | Plan a backup + rotation without writing anything | Before tweaking `--keep-recent` / `--keep-weekly`, or to see which files would be pruned |
 
 ## How to verify success
 
@@ -130,5 +145,6 @@ specific task — then `/loop` is the right shape. Until then, manual.
 - `extract_metadata.py` — Phase 2 metadata extraction
 - `python/qino_lingo/db.py::import_metadata` — Phase 2 db upsert
 - `python/qino_lingo/signals.py::compute_all` — Phase 3 signal computation
+- `python/qino_lingo/backup.py` — Phase 1.5 transactional backup runner
 - `mcp-server/server.py` — the consumer that depends on Phase 3 freshness
 - `docs/mcp-server-evolution.md` — why the MCP server now needs signals at all

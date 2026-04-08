@@ -321,6 +321,12 @@ def main():
     parser.add_argument("--since", help="Only include conversations since date (YYYY-MM-DD)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without importing")
     parser.add_argument("--skip-pipeline", action="store_true", help="Skip filter/metadata/import steps")
+    parser.add_argument(
+        "--skip-backup",
+        action="store_true",
+        help="Skip the pre-pipeline backup. Default behavior is to take a "
+             "transactional snapshot before any db mutation happens.",
+    )
     args = parser.parse_args()
 
     # Get existing session IDs
@@ -384,6 +390,18 @@ def main():
         state["last_ingest"] = datetime.now().isoformat()
         state["last_count"] = copied
         save_state(state)
+
+    # Take a transactional backup of corpus.db before the pipeline mutates
+    # it. The backup is the only thing standing between a botched ingest
+    # and an irrecoverable corpus state, so it runs unconditionally unless
+    # the user opts out with --skip-backup. If the backup itself fails we
+    # refuse to mutate the db — better to surface the failure than to
+    # silently overwrite the only safe checkpoint.
+    if not args.skip_pipeline and not args.skip_backup:
+        print("\n--- Backup ---")
+        from python.qino_lingo.backup import run_backup, print_report
+        result = run_backup(tag="pre-ingest")
+        print_report(result)
 
     # Run pipeline
     if not args.skip_pipeline:

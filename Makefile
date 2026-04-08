@@ -10,6 +10,8 @@
 #   make digest          # Print the corpus digest without ingesting
 #   make signals         # Recompute signals across the corpus (full)
 #   make stats           # Raw db stats
+#   make backup          # Transactional snapshot of corpus.db + manifest
+#   make backup-dry      # Plan a backup + rotation without writing anything
 #   make migrate         # Apply pending corpus.db schema migrations
 #   make migrate-status  # Show applied + pending migrations
 #   make migrate-dry     # Report what `make migrate` would do
@@ -18,7 +20,7 @@
 # to the venv. Both python and python3 in .venv/bin point to the same binary.
 PY := .venv/bin/python
 
-.PHONY: help ingest ingest-recent verify digest signals stats migrate migrate-status migrate-dry
+.PHONY: help ingest ingest-recent verify digest signals stats backup backup-dry migrate migrate-status migrate-dry
 
 help:
 	@echo "qino-lingo ingestion targets:"
@@ -28,6 +30,8 @@ help:
 	@echo "  make digest          Print the corpus digest without ingesting"
 	@echo "  make signals         Recompute signals across the entire corpus"
 	@echo "  make stats           Print raw corpus.db stats"
+	@echo "  make backup          Transactional snapshot of corpus.db + sha256 manifest"
+	@echo "  make backup-dry      Plan a backup + rotation without writing anything"
 	@echo "  make migrate         Apply pending corpus.db schema migrations"
 	@echo "  make migrate-status  Show applied + pending migrations"
 	@echo "  make migrate-dry     Report what migrate would do without applying"
@@ -49,6 +53,12 @@ signals:
 
 stats:
 	@$(PY) -c "from python.qino_lingo.db import get_stats; import json; print(json.dumps(get_stats(), indent=2))"
+
+backup:
+	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.backup
+
+backup-dry:
+	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.backup --dry-run
 
 migrate:
 	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.migrate

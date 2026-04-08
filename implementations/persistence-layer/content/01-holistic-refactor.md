@@ -435,13 +435,27 @@ schema decision.
       `apps/lingo-label/src/server/get-conversation.ts::findConversationFile`.
 
 **Backup overhaul**
-- [ ] Replace `backup-corpus.sh` with `python/qino_lingo/backup.py` using
-      SQLite's transactional `.backup` API
-- [ ] Add manifest of `data/corpus/` (filename + sha256, no content) to the
-      backup directory
-- [ ] Backup script reports counts for new tables (signals, annotations)
-- [ ] Add `make backup` to Makefile
-- [ ] `make ingest` runs backup automatically before destructive db work
+- [x] Replace `backup-corpus.sh` with `python/qino_lingo/backup.py` using
+      SQLite's transactional `.backup` API. Old shell script deleted.
+- [x] Add manifest of `data/corpus/` (filename + sha256 + size, no
+      content) to the backup directory as a sidecar
+      `corpus-TIMESTAMP[-tag].manifest.json`. Manifest is written
+      atomically (`.tmp` + rename).
+- [x] Backup script reports counts for new tables. The report is grouped
+      by consumer (shared / mcp / training) so the dual-purpose nature
+      of the db is visible at backup time, not just in `docs/schema.md`.
+      Tables that don't yet exist on a given db render as `n/a` rather
+      than `0` so a fresh db can be distinguished from an empty one.
+- [x] Add `make backup` and `make backup-dry` to Makefile.
+- [x] `make ingest` runs backup automatically before destructive db
+      work. Implemented as Phase 1.5 inside `ingest_conversations.py`
+      (after files are copied into `data/corpus/`, before
+      `run_pipeline()` mutates the db). `--skip-backup` flag added as
+      an escape hatch for the cases that need it.
+- [x] Rotation: keep last 10 + one per ISO week for 8 weeks.
+      Configurable via `--keep-recent` / `--keep-weekly`. The weekly
+      window walks newest-to-oldest among the *post-recent* tail and
+      keeps the first file per ISO week.
 
 **Diagnostics + observability**
 - [ ] `check_staleness` enhancement: catch coverage gaps + orphan rows
@@ -593,6 +607,101 @@ chosen path.)
 
 (To be filled in after the iteration completes. Capture surprises,
 incidents, and things that should change the next iteration's approach.)
+
+### Chunk 3 — Backup overhaul (landed 2026-04-08)
+
+- **`sqlite3.Connection.backup()` is the right primitive — and it's in
+  the stdlib.** No external dependency. The shell script was using
+  `cp`, which can capture a torn page if a writer is mid-commit; the
+  online backup API holds the right locks for the duration of the
+  copy and produces a snapshot whose `PRAGMA integrity_check` AND
+  `PRAGMA foreign_key_check` both come back clean. Verified on the
+  first real backup of the iteration: a `corpus-…-pre-chunk3-apply.db`
+  snapshot is byte-correct, FK-consistent, and identical in size to
+  the live db.
+- **Atomic manifest writes via `.tmp` + rename.** The manifest is a
+  372KB JSON file listing 2062 files with sha256 + size. A naive write
+  could leave a half-written manifest if the script is killed
+  mid-write. Writing to `manifest_path.with_suffix(".json.tmp")` and
+  then `.replace()` (POSIX `rename()`, atomic on the same filesystem)
+  guarantees the manifest is either complete or absent — never
+  partial. Same trick the SQLite backup API uses internally for the
+  db file.
+- **Two pruning bugs caught by dry-run at boundary inputs.** First
+  draft of `plan_rotation` checked the weekly-window limit *after*
+  adding to the kept set — so `keep_weekly=0` retained one entry
+  instead of zero. Caught by running `--dry-run --keep-recent 3
+  --keep-weekly 0` against the existing 7 backups: expected 4 pruned,
+  saw 3. Fix was a one-line reorder. Second issue: the dry-run was
+  computing rotation against the *current* file set (7 files) instead
+  of the *post-backup* file set (8 files), so the dry-run prune count
+  was off by one against what the real run would do. Fixed by
+  factoring out `split_rotation(list, ...)` from `plan_rotation(dir,
+  ...)` and having the dry-run inject a simulated entry for the
+  would-be new file. Both bugs would have been invisible at default
+  thresholds (`keep_recent=10, keep_weekly=8` against 7 files prunes
+  nothing). **Lesson: dry-run at the *boundaries* of inputs catches
+  more than dry-run at the defaults.**
+- **The chunk-anchor backup convention paid off.** The pre-chunk-0,
+  pre-chunk-1, pre-chunk-2 backups already existed from the previous
+  chunks (taken manually before each migration applied). With the new
+  rotation policy (keep 10 recent + 8 weekly), they all stay safely
+  inside the keep window and become the savepoint timeline that
+  "Sub-iteration discipline" called for. The new
+  `pre-chunk3-apply.db` snapshot continues the convention. After
+  Chunk 4 lands, the backups directory will literally read like the
+  iteration's running git tag history.
+- **Report grouped by consumer (shared / mcp / training).** Pulled
+  the `REPORTED_TABLES` table list from the iteration's "Dual-consumer
+  aware schema" section: `files` is shared; `conversation_signals`
+  and `annotations` are MCP-side; `labels`, `markers`, `examples`,
+  `pending_labels`, `noise_predictions`, `model_feedback`,
+  `calibration_rounds`, `calibration_items` are training-side. This
+  makes the report self-document the dual-purpose nature of the db.
+  When `docs/schema.md` gets its rewrite, the same grouping should be
+  used as the consumer matrix.
+- **Missing tables render as `n/a`, not `0`.** A fresh db (one that
+  hasn't run all migrations yet) has rows missing from
+  `REPORTED_TABLES`. Treating "table missing" as "0 rows" would
+  silently let a half-migrated db pass for an empty one. The `-1`
+  sentinel surfaces the distinction in the report.
+- **Wired into ingestion as Phase 1.5, not as a Make dependency.**
+  Considered chaining `make ingest: backup`, but that would skip the
+  backup if anyone invoked `python3 ingest_conversations.py`
+  directly. Inlining the call inside `main()` (after files copied,
+  before `run_pipeline()` mutates the db) makes the backup *part of
+  the ingest contract* rather than scaffolding around it. Added
+  `--skip-backup` as the only escape hatch.
+- **`--no-rotate` exists for the case where you're about to take a
+  *labeled* backup that you don't want pruned by the rotation
+  arithmetic.** Not used by `make ingest` (which always rotates), but
+  the option is there for ad-hoc usage like
+  `python -m python.qino_lingo.backup --tag pre-major-surgery
+  --no-rotate`.
+- **What `make ingest` looks like end-to-end after Chunk 3**:
+  `claude-extract → temp dir → filter → dedupe → copy into
+  data/corpus/ → BACKUP (transactional snapshot + manifest +
+  rotation) → filter_noise → extract_metadata → import_metadata →
+  signals.compute_all → digest`. Documented in
+  `docs/ingestion-routine.md` as "Phase 1.5 — Backup."
+- **Verification:**
+  - `python -m python.qino_lingo.backup --dry-run` reports current
+    state correctly
+  - `python -m python.qino_lingo.backup --tag chunk3-verify` writes
+    a real `.db` + sidecar `.manifest.json` (then cleaned up; the
+    canonical Chunk-3 anchor is `pre-chunk3-apply.db`)
+  - `sqlite3 backups/...pre-chunk3-apply.db "PRAGMA integrity_check;
+    PRAGMA foreign_key_check;"` returns `ok` and empty
+  - Manifest JSON validates: 2062 entries, every sha256 64 chars
+    long, every entry has `filename` + `sha256` + `size`
+  - `make backup`, `make backup-dry`, `make help` all work
+  - Rotation tested at `keep_recent=3, keep_weekly=0` (3 kept,
+    4 pruned), `keep_recent=3, keep_weekly=2` (5 kept), and
+    defaults (7 kept, 0 pruned)
+  - `make migrate-status` still shows all four migrations from
+    Chunks 0–2 applied — backup module touched no schema
+  - `ingest_conversations.py --help` shows the new `--skip-backup`
+    flag
 
 ### Chunk 2 — Collapse `_noise/` into files.status (landed 2026-04-08)
 
