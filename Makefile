@@ -15,12 +15,14 @@
 #   make migrate         # Apply pending corpus.db schema migrations
 #   make migrate-status  # Show applied + pending migrations
 #   make migrate-dry     # Report what `make migrate` would do
+#   make doctor          # Read-only health check (FK + coverage + reconciliation)
+#   make doctor-verbose  # Same, with up to 5 sample rows per finding
 
 # Use the project venv's python so subprocess `python3` calls also resolve
 # to the venv. Both python and python3 in .venv/bin point to the same binary.
 PY := .venv/bin/python
 
-.PHONY: help ingest ingest-recent verify digest signals stats backup backup-dry migrate migrate-status migrate-dry
+.PHONY: help ingest ingest-recent verify digest signals stats backup backup-dry migrate migrate-status migrate-dry doctor doctor-verbose
 
 help:
 	@echo "qino-lingo ingestion targets:"
@@ -35,6 +37,8 @@ help:
 	@echo "  make migrate         Apply pending corpus.db schema migrations"
 	@echo "  make migrate-status  Show applied + pending migrations"
 	@echo "  make migrate-dry     Report what migrate would do without applying"
+	@echo "  make doctor          Read-only health check (FK + coverage + reconciliation)"
+	@echo "  make doctor-verbose  Same, with sample rows for each non-zero finding"
 
 ingest:
 	@PATH=.venv/bin:$$PATH $(PY) ingest_conversations.py
@@ -68,3 +72,9 @@ migrate-status:
 
 migrate-dry:
 	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.migrate --dry-run
+
+doctor:
+	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.doctor
+
+doctor-verbose:
+	@PATH=.venv/bin:$$PATH $(PY) -m python.qino_lingo.doctor --verbose

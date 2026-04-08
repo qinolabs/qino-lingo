@@ -34,11 +34,19 @@ from qino_lingo.signals import (
     detect_correction,
     detect_meta_awareness,
 )
+from qino_lingo.doctor import run_doctor, write_report_file
 
 # Paths
 PROJECT_DIR = Path(__file__).parent.parent
 DB_PATH = PROJECT_DIR / "corpus.db"
 CORPUS_DIR = PROJECT_DIR / "data" / "corpus"
+
+# Where the MCP server drops a sidecar doctor report on startup. The user
+# can `cat` it any time to see whether the corpus the server is reading
+# from is internally consistent. This file is the only reliable surface
+# we have for showing warnings to the user — IDEs hosting the MCP server
+# subprocess swallow stderr, and there's no other side channel.
+DOCTOR_REPORT_PATH = PROJECT_DIR / "corpus-doctor.txt"
 
 mcp = FastMCP(
     "qino-lingo",
@@ -53,13 +61,41 @@ mcp = FastMCP(
 # Schema is owned by python/qino_lingo/migrations/. The MCP server
 # trusts it has been applied via `make migrate`. No defensive DDL here.
 
-# Check staleness on startup
-_staleness = check_staleness(DB_PATH)
-if _staleness["is_stale"]:
+# ----------------------------------------------------------------------
+# Startup health check
+# ----------------------------------------------------------------------
+#
+# Three surfaces for the same finding so the user can't miss it:
+#   1. stderr — kept for terminals that show it
+#   2. corpus-doctor.txt — sidecar file the user can `cat` any time;
+#      this is the only channel that survives an IDE swallowing stderr
+#   3. The `stats()` MCP tool — embeds the same finding in its return
+#      payload (see below) so the next call to a tool the user is
+#      likely to make also surfaces the warning
+#
+# `_LATEST_DOCTOR` caches the result of the startup run for re-use by
+# `stats()` so we don't double-walk the corpus per request.
+
+try:
+    _LATEST_DOCTOR = run_doctor(db_path=DB_PATH, corpus_dir=CORPUS_DIR)
+    write_report_file(_LATEST_DOCTOR, DOCTOR_REPORT_PATH)
+    if not _LATEST_DOCTOR.is_healthy:
+        print(
+            f"WARNING: corpus health check found issues. "
+            f"See {DOCTOR_REPORT_PATH} or run `make doctor` for details. "
+            f"(active={_LATEST_DOCTOR.active_files}, "
+            f"signals={_LATEST_DOCTOR.signals_total}, "
+            f"coverage_gap={_LATEST_DOCTOR.coverage_gap_total}, "
+            f"fk_violations={len(_LATEST_DOCTOR.fk_violations)})",
+            file=sys.stderr,
+        )
+except Exception as e:
+    # Doctor must never crash the MCP server. If something goes wrong
+    # at startup we surface it but keep serving — a degraded server is
+    # more useful than no server.
+    _LATEST_DOCTOR = None
     print(
-        f"WARNING: {_staleness['stale_count']} conversation signals are stale "
-        f"(stored: mixed, current: {ALGORITHM_VERSION}). "
-        f"Run: python -m qino_lingo.signals compute",
+        f"WARNING: corpus health check failed to run: {e}",
         file=sys.stderr,
     )
 
@@ -485,6 +521,9 @@ def stats() -> dict:
             staleness = check_staleness(DB_PATH)
             result["signals"]["algorithm_version"] = staleness["current_version"]
             result["signals"]["stale"] = staleness["is_stale"]
+            result["signals"]["stale_count"] = staleness["stale_count"]
+            result["signals"]["coverage_gap"] = staleness["coverage_gap"]
+            result["signals"]["orphan_signal_rows"] = staleness["orphan_signal_rows"]
 
         # Annotation aggregates
         ann_total = conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
@@ -494,6 +533,30 @@ def stats() -> dict:
                 "SELECT kind, COUNT(*) FROM annotations GROUP BY kind"
             ).fetchall()
             result["annotations"]["by_kind"] = {r[0]: r[1] for r in kinds}
+
+        # Doctor health summary — surfaces the same warning the startup
+        # hook wrote to corpus-doctor.txt. Embedded in stats() because
+        # stats() is one of the first tools an exploring user calls,
+        # and IDEs hosting the MCP server swallow stderr so the
+        # startup-time warning may never reach the user.
+        if _LATEST_DOCTOR is not None:
+            result["health"] = {
+                "is_healthy": _LATEST_DOCTOR.is_healthy,
+                "active_files": _LATEST_DOCTOR.active_files,
+                "signals_total": _LATEST_DOCTOR.signals_total,
+                "coverage_gap_total": _LATEST_DOCTOR.coverage_gap_total,
+                "coverage_gap_substantive":
+                    _LATEST_DOCTOR.coverage_gap_substantive,
+                "stale_signal_rows": _LATEST_DOCTOR.stale_signal_rows,
+                "orphan_signal_rows": _LATEST_DOCTOR.orphan_signal_rows,
+                "fk_violations": len(_LATEST_DOCTOR.fk_violations),
+                "report_file": str(DOCTOR_REPORT_PATH),
+            }
+            if not _LATEST_DOCTOR.is_healthy:
+                result["health"]["warning"] = (
+                    "Corpus health check found issues. "
+                    f"See {DOCTOR_REPORT_PATH} or run `make doctor`."
+                )
 
         return result
 

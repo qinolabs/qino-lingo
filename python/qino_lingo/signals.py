@@ -431,22 +431,86 @@ def store_signals(
 
 
 def check_staleness(db_path: Path = DEFAULT_DB_PATH) -> dict:
-    """Check if stored signals are stale (different algorithm version)."""
+    """Check the signal layer's health.
+
+    Originally this only caught algorithm-version drift. Chunk 4 widened
+    it to surface every shape of "the signal layer is out of date with
+    the file layer" the iteration cares about, so callers like the MCP
+    server's startup hook get a single answer to "is this corpus
+    healthy enough to serve?":
+
+    - `stale_count` — signal rows whose `algorithm_version` != current.
+      Fix: `python -m python.qino_lingo.signals compute`.
+    - `coverage_gap` — `status='active'` files with no `conversation_signals`
+      row. After Chunk 4 these should normally be zero because
+      `compute_all` flips unscorable files to `status='empty'`. A
+      non-zero value is a real signal that `make signals` needs to run.
+    - `orphan_signal_rows` — signal rows whose filename does not resolve
+      to a `files` row. With FK enforcement on (Chunk 1) this should be
+      zero; surfacing it lets the MCP server prove its joins are clean.
+
+    The boolean `is_stale` flips on for ANY of the three. Existing
+    callers that only branch on `is_stale` continue to work; new
+    callers can read the per-finding counts to render a useful warning.
+
+    The function name is preserved for backwards compatibility — at
+    this point "staleness" has stretched to mean "signal layer health"
+    rather than just "algorithm version drift," but renaming it would
+    churn callers without payoff. The companion `doctor` module is the
+    home for richer health reporting.
+    """
     with get_connection(db_path) as conn:
-        row = conn.execute(
+        stale = conn.execute(
             "SELECT COUNT(*) FROM conversation_signals WHERE algorithm_version != ?",
             (ALGORITHM_VERSION,),
-        ).fetchone()
-        stale = row[0] if row else 0
+        ).fetchone()[0]
 
-        total = conn.execute("SELECT COUNT(*) FROM conversation_signals").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM conversation_signals"
+        ).fetchone()[0]
+
+        coverage_gap = conn.execute(
+            """
+            SELECT COUNT(*) FROM files f
+            WHERE f.status = 'active'
+            AND f.filename NOT IN (SELECT filename FROM conversation_signals)
+            """
+        ).fetchone()[0]
+
+        orphan_signal_rows = conn.execute(
+            """
+            SELECT COUNT(*) FROM conversation_signals cs
+            WHERE cs.filename NOT IN (SELECT filename FROM files)
+            """
+        ).fetchone()[0]
 
         return {
             "current_version": ALGORITHM_VERSION,
             "total_computed": total,
             "stale_count": stale,
-            "is_stale": stale > 0,
+            "coverage_gap": coverage_gap,
+            "orphan_signal_rows": orphan_signal_rows,
+            "is_stale": (
+                stale > 0
+                or coverage_gap > 0
+                or orphan_signal_rows > 0
+            ),
         }
+
+
+def mark_status(filename: str, status: str, db_path: Path = DEFAULT_DB_PATH) -> None:
+    """Update files.status for one filename. Internal helper.
+
+    Used by compute_all to flip files into `empty` (when the v6 algorithm
+    refuses to score them) or `missing` (when the markdown file is gone
+    from disk). Both are recorded reasons that doctor reads to distinguish
+    "real coverage hole" from "expected baseline."
+    """
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE files SET status = ? WHERE filename = ?",
+            (status, filename),
+        )
 
 
 def compute_all(
@@ -462,13 +526,37 @@ def compute_all(
     that way noise files (which now physically live alongside active
     files at the top level of data/corpus/) are correctly skipped.
 
+    Chunk 4 addition: when `analyze_conversation` returns None for an
+    active file (the v6 algorithm refused to score it because the
+    cleaned exchange list has fewer than 2 non-system non-terse turns),
+    flip the file's status from 'active' to 'empty'. The 'empty' enum
+    value was added in migration 03-extend-status-enum.sql precisely so
+    that doctor's signal-coverage audit can distinguish "no signal row
+    because the file is legitimately too thin to score" from "no signal
+    row because something is broken." Without this flip, every fresh
+    pass through compute_all rebuilds the same hidden bucket of 300+
+    files that look like coverage holes but aren't.
+
+    Likewise, files that are 'active' in db but missing on disk are
+    flipped to 'missing' so the next doctor run sees a clean
+    reconciliation rather than the same drift surfaced over and over.
+
+    The query walks BOTH `status='active'` AND `status='empty'`. The
+    asymmetry — empty walked but noise/missing not — exists so an
+    algorithm bump (v6 -> v7) can rehydrate previously-empty files
+    automatically: if a file that was unscorable under v6 produces a
+    result under v7, compute_all promotes it back to 'active' and
+    stores the signals. Without this, a `mark_status('empty')` would
+    be a one-way trip and the empty bucket would gradually pollute
+    with files that are only "empty" relative to a stale algorithm.
+
     Args:
         corpus_dir: Directory containing conversation markdown files
                     (used to resolve filenames to filepaths)
         db_path: Database path
         since: Only compute for files dated on or after this date (YYYY-MM-DD)
     """
-    query = "SELECT filename FROM files WHERE status = 'active'"
+    query = "SELECT filename, status FROM files WHERE status IN ('active', 'empty')"
     params: tuple = ()
     if since:
         query += " AND date >= ?"
@@ -477,30 +565,45 @@ def compute_all(
 
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
-        active_filenames = [r[0] for r in rows]
+        candidates = [(r[0], r[1]) for r in rows]
 
-    print(f"Computing signals for {len(active_filenames)} active conversations...")
+    print(f"Computing signals for {len(candidates)} candidate conversations "
+          f"(active + empty)...")
     computed = 0
+    promoted = 0
+    marked_empty = 0
+    marked_missing = 0
     skipped = 0
-    missing = 0
 
-    for filename in active_filenames:
+    for filename, current_status in candidates:
         filepath = corpus_dir / filename
         if not filepath.exists():
-            missing += 1
+            mark_status(filename, "missing", db_path)
+            marked_missing += 1
             continue
         signals = analyze_conversation(filepath)
         if signals:
             if store_signals(signals, db_path):
                 computed += 1
+                if current_status == "empty":
+                    mark_status(filename, "active", db_path)
+                    promoted += 1
             else:
                 skipped += 1
         else:
-            skipped += 1
+            if current_status != "empty":
+                mark_status(filename, "empty", db_path)
+                marked_empty += 1
 
-    msg = f"Done: {computed} computed, {skipped} skipped"
-    if missing:
-        msg += f", {missing} missing on disk"
+    msg = f"Done: {computed} computed"
+    if promoted:
+        msg += f", {promoted} promoted empty -> active"
+    if marked_empty:
+        msg += f", {marked_empty} marked empty"
+    if marked_missing:
+        msg += f", {marked_missing} marked missing"
+    if skipped:
+        msg += f", {skipped} skipped"
     print(msg)
     return computed
 
@@ -533,10 +636,19 @@ def main():
     elif args.command == "check":
         result = check_staleness(Path(args.db))
         print(f"Algorithm version: {result['current_version']}")
-        print(f"Computed signals: {result['total_computed']}")
+        print(f"Computed signals:  {result['total_computed']}")
+        print(f"Stale rows:        {result['stale_count']}")
+        print(f"Coverage gap:      {result['coverage_gap']}")
+        print(f"Orphan signal rows:{result['orphan_signal_rows']}")
         if result["is_stale"]:
-            print(f"WARNING: {result['stale_count']} signals are stale — run 'compute' to update")
+            print()
+            print(
+                "WARNING: signal layer is out of date — run "
+                "'python -m python.qino_lingo.signals compute' "
+                "or 'make doctor' for the full report"
+            )
         else:
+            print()
             print("All signals up to date")
     elif args.command == "version":
         print(f"Algorithm version: {ALGORITHM_VERSION}")

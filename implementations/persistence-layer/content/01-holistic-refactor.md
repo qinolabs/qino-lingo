@@ -1,7 +1,8 @@
 # 01 — Holistic refactor of the persistence layer
 
-**Status**: in progress
+**Status**: complete
 **Started**: 2026-04-08
+**Completed**: 2026-04-08 (Chunks 0–4; Chunk 5 deferred as optional)
 **Trigger**: routine ingestion uncovered massive silent FK orphaning;
 investigation revealed the schema was built for labeling and never adapted
 when the MCP server became a second consumer.
@@ -458,10 +459,10 @@ schema decision.
       keeps the first file per ISO week.
 
 **Diagnostics + observability**
-- [ ] `check_staleness` enhancement: catch coverage gaps + orphan rows
-- [ ] Add `make doctor` — runs `PRAGMA foreign_key_check`, signal coverage
+- [x] `check_staleness` enhancement: catch coverage gaps + orphan rows
+- [x] Add `make doctor` — runs `PRAGMA foreign_key_check`, signal coverage
       audit, file/db reconciliation report
-- [ ] MCP server startup: surface stale/orphan warnings in a way the user
+- [x] MCP server startup: surface stale/orphan warnings in a way the user
       can actually see (not just stderr)
 
 **Documentation**
@@ -607,6 +608,183 @@ chosen path.)
 
 (To be filled in after the iteration completes. Capture surprises,
 incidents, and things that should change the next iteration's approach.)
+
+### Chunk 4 — Diagnostics + observability (landed 2026-04-08)
+
+- **The 396-file gap was a category error in the doctor's first
+  draft, not a real coverage hole.** Initial doctor implementation
+  split the gap into "thin (legit)" vs "substantive (real)" using
+  `files.substantive_user_turns < 2` as the proxy for "the v6
+  algorithm will refuse to score this." That heuristic gave the
+  expected number on a sample (330 thin, 66 substantive), and the
+  66 looked like real coverage holes — until I spot-checked one.
+  `analyze_conversation()` returned None for *all 66*, because the
+  v6 algorithm's actual rejection rule is
+  `len([e for e in clean_conversation(file) if not e.is_system and
+  not e.is_terse]) >= 2`, and `clean_conversation` flags many
+  agent-style turns as `is_system` even when ingestion counted them
+  as substantive. The proxy was wrong; the *only* way to know if
+  the algorithm will score a file is to run it. So Chunk 4's real
+  fix isn't "doctor splits the gap better" — it's "the underlying
+  data records the result of the run." Compute_all now flips
+  unscorable files from `status='active'` to `status='empty'` (the
+  enum value Chunk 2 added precisely so this could happen), and
+  doctor's coverage audit collapses to a single number that should
+  be zero in steady state. Total before: 396 mysterious gap files.
+  After: 0. Status breakdown: 1037 active / 396 empty / 629 noise
+  = 2062 total.
+- **The `'empty'` status must be re-evaluable, not one-way.** First
+  draft of `compute_all` only walked `status='active'` and
+  flipped non-scorable files to `'empty'`. That made an algorithm
+  bump (v6 -> v7) silently break coverage: any file v7 could now
+  score would stay invisibly stuck at `'empty'`. Fix: walk
+  `status IN ('active', 'empty')` and promote `'empty' -> 'active'`
+  whenever `analyze_conversation` returns a result. The asymmetry
+  (empty walked but `noise` and `missing` not) is deliberate —
+  noise is a content judgment that the user owns, not the
+  algorithm. Empty is purely an algorithm verdict, so the
+  algorithm should be free to revise it.
+- **Doctor's "thin (legit)" bucket is now a transient diagnostic,
+  not a steady-state finding.** It only fires between an ingest
+  (which writes new rows as `'active'`) and the next `make signals`
+  (which moves the unscorable ones to `'empty'`). Because the
+  thin-legit bucket does NOT flip `is_healthy` to false, doctor
+  exits 0 in that transient window — telling CI "this is fine,
+  signals just need to catch up" — while still surfacing the
+  number on screen. The substantive bucket *does* flip
+  `is_healthy`. Two buckets with different verdicts in one report
+  was the right shape: a failure in CI, but not panic in the
+  console.
+- **Three surfaces for the warning, because IDEs swallow stderr.**
+  The iteration explicitly called this out: "loud warning that the
+  user can actually see — NOT just stderr." Solution turned out to
+  be three complementary channels:
+    1. The classic stderr print on MCP server startup, kept for
+       terminals that show it.
+    2. A sidecar `corpus-doctor.txt` written atomically (`.tmp` +
+       rename, the manifest pattern from Chunk 3) at the project
+       root. The user can `cat` this any time and the file is
+       fresh as of the last MCP server start.
+    3. A `health` block embedded in the `stats()` MCP tool's
+       return value, sourced from `_LATEST_DOCTOR` cached at
+       startup. `stats()` is one of the first tools an exploring
+       user calls, so even if the user never sees stderr or the
+       sidecar, the warning surfaces the next time they ask the
+       server what's in the corpus. None of these surfaces
+       *require* the user to know to look — that's the point.
+- **Doctor never goes through `db.get_connection`.** It opens a
+  raw `sqlite3.connect` so it can't accidentally commit anything.
+  Doctor is read-only by *type*, not by convention. The cost of a
+  raw connect is one explicit `PRAGMA foreign_keys = ON` line at
+  the top of `run_doctor` (where `get_connection` does it for free)
+  — small price for the guarantee.
+- **Belt-and-suspenders FK orphan checks.** The first FK check is
+  `PRAGMA foreign_key_check`, which only sees orphans visible to
+  SQLite's own enforcement. The second is a per-table direct query
+  (`SELECT COUNT(*) FROM dependent WHERE filename NOT IN (SELECT
+  filename FROM files)`) that catches orphans which slipped in via
+  a connection where FK enforcement was off. The two paths
+  duplicate effort in the healthy case but disagree on exactly the
+  pathological inputs we need to surface — caught by the test that
+  inserted an orphan row with `PRAGMA foreign_keys=OFF`: the
+  pragma check returned clean, the direct query found the orphan,
+  doctor still exited 1. With FK enforcement universally on after
+  Chunk 1 this should never matter, but the cost is one extra
+  query per dependent table.
+- **A single test reproducer hit four failure surfaces at once.**
+  Renaming a `files.filename` row out from under its dependents
+  (with FK enforcement off) was a one-line `UPDATE`. Doctor's
+  output for that test caught it via: (1) `PRAGMA foreign_key_check`,
+  (2) file/db reconciliation (the row's filename no longer matches
+  any file on disk), (3) signal coverage (its filename is no longer
+  in the active files set), and (4) orphan signal rows (the
+  conversation_signals row still references the old filename). All
+  four marked FAIL. Verdict: ISSUES FOUND, exit 1. This wasn't a
+  goal — it fell out of the orthogonal-checks design — but it's
+  reassuring that one root incident lights up multiple
+  independent indicators.
+- **`stats()` now embeds the doctor result instead of recomputing
+  staleness inside the tool.** Pre-Chunk 4, `stats()` called
+  `check_staleness()` directly inside its handler. After Chunk 4,
+  it reads from `_LATEST_DOCTOR` cached at server startup and
+  exposes a `health` sub-object with `is_healthy`, the gap
+  numbers, and the report file path. This avoids walking the
+  corpus on every `stats()` call AND makes the freshness window of
+  the warning explicit (it's the last MCP server restart, not "the
+  current moment"). For users who want a real-time check, `make
+  doctor` is the answer.
+- **`check_staleness` was widened in place rather than renamed.**
+  Its name no longer literally matches what it does (it now
+  catches coverage gaps and orphan rows in addition to algorithm
+  drift), but renaming it would churn callers in `signals.py`,
+  `signals.py CLI`, `mcp-server/server.py`, and
+  `mcp-server/server.py::stats()` for no functional payoff. The
+  function is documented as "signal layer health check"
+  internally, and `doctor` is the new home for richer reporting.
+  General principle: when a function's job stretches but its
+  return type stays a superset of what callers expect, widen in
+  place; when callers need to change, rename.
+- **The digest's `Active files: 1037` looks wrong but is right.**
+  Pre-Chunk 4 the digest reported `Active files: 1433`, which
+  included all the files that were structurally `'active'` but
+  semantically empty. After Chunk 4 the empty bucket is
+  externalized and the digest reports the *true* active count
+  (1037, which equals the count of files with signal rows). The
+  optical drop is 396 — which is the same number that just
+  showed up in `[files] active+empty=1433` accounting elsewhere.
+  Future iterations should consider adding `Empty files: N` to
+  the digest output so the apparent shrinkage is self-explanatory,
+  but that's cosmetic — Chunk 4's job is to make the underlying
+  count correct, not to render every consumer of it perfectly.
+- **`signal_coverage` denominator is `active_files`, not `total
+  files`.** This is the right denominator: it answers "of files
+  the algorithm could score, how many has it scored?" 100% means
+  every actively-tracked conversation has a signal row. 99% would
+  mean a fresh ingest hasn't yet been followed by `make signals`.
+  Anything lower means a real coverage hole. The nuance here:
+  empty files are *intentionally* outside the denominator, which
+  is why the new compute_all flow is what makes the metric
+  meaningful. Without the empty flip, the denominator was
+  permanently inflated by hundreds of files that could never be
+  scored, and "100% coverage" was unreachable by construction.
+- **Verification:**
+  - `make migrate-status` — all four migrations from Chunks 0-3
+    still applied; Chunk 4 added none
+  - `make doctor` — exits 0 against the live corpus, all 13
+    indicators OK, verdict OK
+  - `make doctor-verbose` — same plus the empty samples section
+    when there are findings (verified via deliberate-failure
+    tests against `/tmp/test-*.db` copies)
+  - `make signals` — reports `1037 computed, 396 marked empty` on
+    the first run that introduced the reclassification, then
+    `1037 computed` on every subsequent run (idempotent)
+  - `python -m python.qino_lingo.signals check` — extended CLI
+    reports the four health numbers (algorithm version, computed
+    signals, stale rows, coverage gap, orphan signal rows)
+  - `make backup` — still works; latest backup reflects the new
+    `1037 active / 396 empty / 629 noise` status breakdown
+  - `make digest` — `Active files: 1037 / With signals: 1037 /
+    Without signals: 0 / Latest in db: 2026-04-07`
+  - `make stats` — by_status block reports
+    `{active: 1037, empty: 396, noise: 629}`
+  - `PRAGMA foreign_key_check` against live db — empty
+  - MCP server startup hook — verified by importing `server` in
+    a python -c invocation: `_LATEST_DOCTOR` populates,
+    `corpus-doctor.txt` materializes at the project root,
+    `is_healthy=True`
+  - Deliberate failure tests against db copies:
+    - stale row -> exit 1, `[FAIL] algorithm version`
+    - orphan signal row (FK disabled insert) -> exit 1, `[FAIL]
+      orphan signal rows` AND `[FAIL] orphan conversation_signals
+      rows`
+    - renamed parent row (FK pragma catches it) -> exit 1, four
+      simultaneous `[FAIL]` lines from four orthogonal checks
+  - `pnpm typecheck` for `apps/lingo-label` — clean (no schema
+    or types changed)
+  - `make help` — lists `doctor` and `doctor-verbose`
+  - Anchor backup `corpus-20260408-033934-pre-chunk4-apply.db`
+    written at the start of the chunk; rotation kept it inside
+    the recent window
 
 ### Chunk 3 — Backup overhaul (landed 2026-04-08)
 

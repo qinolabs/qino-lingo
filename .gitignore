@@ -5,6 +5,10 @@ data/corpus/
 corpus.db
 backups/
 
+# Doctor sidecar — written by the MCP server on startup so the user can
+# read the latest health check; rewritten on every server start.
+corpus-doctor.txt
+
 # Generated metadata
 metadata.json
 .ingest_state.json
